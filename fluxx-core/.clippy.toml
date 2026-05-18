@@ -1,0 +1,16 @@
+avoid_breaking_exported_api = true
+blacklisted_names = ["todo", "fixme"]
+cognitive_complexity_threshold = 25
+disallowed_methods = []
+disallowed_types = []
+enum_variant_name_threshold = 3
+excessive_nesting_threshold = 0
+future_size_threshold = 16384
+macro_metavars_in_unsafe = true
+max_fn_args = 7
+max_struct_fields = 10
+standard_macro_braces = []
+struct_field_name_threshold = 3
+type_complexity_threshold = 250
+upper_case_acronyms_aggressive = true
+warn_on_all_autofixable_lints = true

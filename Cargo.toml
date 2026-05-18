@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "fluxx-core",
+    "fluxx-api",
+]
+
+# Shared profile defaults — keep release builds reasonable and
+# debug builds fast enough for `cargo run`.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.dev]
+opt-level = 0
+debug = true

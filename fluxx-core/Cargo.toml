@@ -1,0 +1,131 @@
+[package]
+name = "fluxx-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Fluxx Team <team@fluxx.dev>"]
+description = "Fluxx core — agent runtime, storage, analysis, and the `fluxx` CLI binary. HTTP routes live in the sibling fluxx-api crate."
+license = "Apache-2.0"
+repository = "https://github.com/fluxx/agent"
+keywords = ["observability", "monitoring", "metrics", "logs", "tracing"]
+categories = ["development-tools", "network-programming"]
+rust-version = "1.95"
+
+# Explicit binary configuration - only includes src/main.rs, not tests
+[[bin]]
+name = "fluxx"
+path = "src/main.rs"
+
+[dependencies]
+urlencoding = "2"
+num_cpus = "1.16"
+simd-json = { version = "0.13", features = ["serde_impl", "runtime-detection"] }
+zstd = { version = "0.13", features = ["pkg-config"] }
+lz4 = "1.24"
+byteorder = "1.5"
+memmap2 = "0.9"
+crossbeam = "0.8"
+parking_lot = "0.12"
+async-trait = "0.1"
+thiserror = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "multipart"], default-features = false }
+config = "0.14"
+# `fluxx init` writes + validates fluxx.toml at the repo root. We
+# use the toml crate directly (rather than going through `config`)
+# because we need to parse with `deny_unknown_fields` for forward-
+# compat — typos in producer config should fail loudly, not silently.
+toml = "0.8"
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+tokio-retry = "0.3"
+url = "2.5"
+quinn = "0.11"
+tonic = "0.12"
+prost = "0.13"
+axum = { version = "0.7", features = ["ws", "multipart"] }
+tower-http = { version = "0.5", features = ["cors"] }
+bytes = "1.6"
+rand = "0.8"
+regex = "1.10"
+chrono = { version = "0.4", features = ["serde"] }
+serde_yaml = "0.9"
+whoami = "1.5"
+base64 = "0.22"
+sha2 = "0.10"
+# Runtime-grant signing: HMAC-SHA256 over (body || nonce || timestamp) using
+# the per-grant key from the control plane. See src/license/grant.rs.
+hmac = "0.12"
+hex = "0.4"
+# Machine fingerprint stable inputs. `dirs` resolves ~/.fluxx/ for the
+# 7-day license cache; `hostname` and `mac_address` are inputs to the
+# fingerprint sha256.
+dirs = "5.0"
+hostname = "0.4"
+mac_address = "1.1"
+# TLS SPKI pinning support for the API client. Version pinned to match
+# what reqwest 0.12 pulls in transitively so we get the same TLS types.
+rustls = { version = "0.23", features = ["std"] }
+# JS sourcemap parsing for on-ingest symbolication. The `sourcemap`
+# crate is BSD-licensed, mature, and powers Sentry's symbolication
+# stack.
+sourcemap = "9"
+sysinfo = "0.30"
+opentelemetry-proto = { version = "0.7", features = ["gen-tonic-messages", "with-serde"] }
+prost-types = "0.13"
+rust-embed = "8"
+mime_guess = "2"
+snap = "1"
+# gzip — used by the OTLP HTTP receiver to ungzip incoming payloads
+# from SDKs that ship with `compression: 'gzip'` enabled.
+flate2 = "1"
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }
+tempfile = "3"
+# testcontainers powers `tests/clickhouse_integration.rs`. The test
+# module is gated behind `#[ignore]` so the dep is only fetched when
+# someone actually runs the integration suite — no impact on default
+# `cargo test` runs (and no Docker requirement for them).
+testcontainers = "0.23"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = "0.12"
+aya-log = "0.2"
+aya-obj = "0.1"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+pcap = "2.0"
+
+# Release profile optimized for binary size
+[profile.release]
+opt-level = "z"          # Optimize for size
+lto = true               # Enable Link Time Optimization
+codegen-units = 1        # Single codegen unit for better optimization
+strip = true             # Strip debug symbols
+panic = "abort"          # Use abort instead of unwind (smaller)
+
+# Profile for distribution (maximum size reduction)
+[profile.dist]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Profile for CI/testing (faster builds, still optimized)
+[profile.ci]
+inherits = "release"
+opt-level = 2
+lto = false
+codegen-units = 16
+strip = false
+panic = "unwind"

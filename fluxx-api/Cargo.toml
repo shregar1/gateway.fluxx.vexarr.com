@@ -1,0 +1,45 @@
+[package]
+name = "fluxx-api"
+version = "0.1.0"
+edition = "2021"
+authors = ["Fluxx Team <team@fluxx.dev>"]
+description = "Fluxx HTTP API surface — Axum routes + state types + response envelopes. Depends on fluxx-core for storage/analysis/session primitives; consumed by fluxx-core's `fluxx` binary to start the server."
+license = "Apache-2.0"
+repository = "https://github.com/fluxx/agent"
+rust-version = "1.95"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Inherit the agent primitives this surface wraps (analysis, storage,
+# sessions, models, security, integrations, …). Path-based so the
+# workspace stays buildable without a registry round-trip.
+fluxx-core = { path = "../fluxx-core" }
+
+# Web stack — kept aligned with what fluxx-core already pulls in so the
+# resolver doesn't pick conflicting versions.
+axum = { version = "0.7", features = ["macros", "ws", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs", "trace", "compression-gzip"] }
+hyper = "1"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+async-trait = "0.1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+parking_lot = "0.12"
+url = "2"
+urlencoding = "2"
+rust-embed = { version = "8", features = ["compression"] }
+reqwest = { version = "0.12", features = ["json"], default-features = false }
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+bytes = "1"
+futures = "0.3"

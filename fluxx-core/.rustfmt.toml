@@ -1,0 +1,9 @@
+edition = "2024"
+newline_style = "Unix"
+tab_spaces = 4
+max_width = 100
+reorder_imports = true
+group_imports = "StdExternalCrate"
+combine_control_expr = true
+fn_single_line = true
+where_single_line = true

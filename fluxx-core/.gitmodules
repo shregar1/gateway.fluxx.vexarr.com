@@ -1,0 +1,4 @@
+[submodule "node.dashboard.fluxx.dev"]
+	path = node.dashboard.fluxx.dev
+	url = https://github.com/shregar1/node.dashboard.fluxx.dev.git
+	branch = main

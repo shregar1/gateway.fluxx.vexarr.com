@@ -1,0 +1,39 @@
+# ── Secrets / env ─────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# ── Rust ──────────────────────────────────────────────────────────────────────
+target/
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
+
+# ── Editors / OS ──────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Logs / coverage ───────────────────────────────────────────────────────────
+*.log
+tarpaulin-report.html
+cobertura.xml
+
+# ── Build artefacts that live alongside source ────────────────────────────────
+dist/
+build/
+node_modules/
+
+# ── Local-only tooling state ──────────────────────────────────────────────────
+.claude/
+.cursor/
+
+# ── Asset paths we know are missing locally (RustEmbed targets) ──────────────
+# Keep the source dirs tracked, but these generated outputs shouldn't be.
+fluxx-core/dashboard/
+fluxx-core/assets/install/install_agent.sh
+fluxx-core/assets/install/install_agent.ps1
