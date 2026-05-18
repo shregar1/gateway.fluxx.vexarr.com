@@ -4,8 +4,8 @@
 //! - GET /v1/traces/:trace_id — fetch all spans belonging to a trace
 //! - GET /v1/traces — list recent traces with filtering
 
-use crate::api::{ApiState, StandardResponse};
-use crate::models::event::{Event, ProtocolType};
+use crate::{ApiState, StandardResponse};
+use fluxx_core::models::event::{Event, ProtocolType};
 use axum::{
     extract::{Path, State, Query},
     response::IntoResponse,
@@ -78,7 +78,7 @@ pub async fn get_trace(
 
     let spans: Vec<SpanDetail> = matching.iter().map(|e| {
         let meta = &e.metadata.extra;
-        let is_error = matches!(e.severity, crate::models::event::EventSeverity::High | crate::models::event::EventSeverity::Critical);
+        let is_error = matches!(e.severity, fluxx_core::models::event::EventSeverity::High | fluxx_core::models::event::EventSeverity::Critical);
         SpanDetail {
             span_id: e.id.clone(),
             parent_span_id: meta.get("parent_span_id").cloned().filter(|s| !s.is_empty()),
@@ -156,7 +156,7 @@ pub async fn list_traces(
         let min_start = spans.iter().map(|s| s.timestamp_us).min().unwrap_or(0);
         let max_end = spans.iter().map(|s| s.timestamp_us + s.latency_us).max().unwrap_or(0);
         let has_errors = spans.iter().any(|s| matches!(s.severity,
-            crate::models::event::EventSeverity::High | crate::models::event::EventSeverity::Critical));
+            fluxx_core::models::event::EventSeverity::High | fluxx_core::models::event::EventSeverity::Critical));
 
         TraceSummary {
             trace_id,

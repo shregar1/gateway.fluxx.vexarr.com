@@ -13,7 +13,7 @@
 //!   POST /v1/errors/:fingerprint/resolve  — set in-memory status to Resolved
 //!   POST /v1/errors/:fingerprint/mute     — set in-memory status to Muted
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{
     extract::{Path, Query, State},
     response::IntoResponse,

@@ -3,7 +3,7 @@
 //! Per-project/team ingestion quotas with configurable limits.
 //! Prevents runaway costs and noisy-neighbor problems in multi-tenant deployments.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{
     extract::{State, Path},
     response::IntoResponse,

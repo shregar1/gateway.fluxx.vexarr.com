@@ -4,7 +4,7 @@
 //! Tracks: page loads, web vitals (LCP/FID/CLS/FCP/TTFB), JS errors,
 //! network requests, user actions, sessions, and custom events.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{
     extract::{State, Query},
     response::IntoResponse,
@@ -224,7 +224,7 @@ struct ErrorTrackCall {
     message: String,
     service: String,
     stack: Option<String>,
-    ctx: crate::analysis::error_tracking::TrackContext,
+    ctx: fluxx_core::analysis::error_tracking::TrackContext,
 }
 
 /// Extract the tracker payload from a RUM event, returning `None` for
@@ -260,7 +260,7 @@ fn error_call_from_rum_event(ev: &RumEvent) -> Option<ErrorTrackCall> {
         ev.application_id.clone()
     };
 
-    let mut ctx = crate::analysis::error_tracking::TrackContext::default();
+    let mut ctx = fluxx_core::analysis::error_tracking::TrackContext::default();
     ctx.release = ev.app_version.clone().unwrap_or_default();
     ctx.environment = ev.environment.clone().unwrap_or_default();
     ctx.session_id = ev.session_id.clone();

@@ -14,8 +14,8 @@
 //!       aggregation: "recording_rule"
 //! ```
 
-use crate::models::metric::{Metric, MetricType};
-use crate::storage::metric_store::MetricStore;
+use fluxx_core::models::metric::{Metric, MetricType};
+use fluxx_core::storage::metric_store::MetricStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -94,7 +94,7 @@ async fn evaluate_rule(
     let metric_name = extract_metric_name(&rule.expr);
     let lookback_us = 300 * 1_000_000u64; // 5 minutes
 
-    let window = crate::storage::event_store::TimeWindow::new(
+    let window = fluxx_core::storage::event_store::TimeWindow::new(
         now_us.saturating_sub(lookback_us), now_us,
     );
 

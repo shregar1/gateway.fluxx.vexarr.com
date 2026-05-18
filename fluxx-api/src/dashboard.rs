@@ -1,100 +1,154 @@
+//! Embedded per-node dashboard for fluxx-api.
+//!
+//! The Vite-built bundle in `../node.dashboard.fluxx.vexarr.com/dist/`
+//! is compiled into the api crate when the `bundled-dashboard` feature
+//! is on. The feature is OFF by default because the dashboard repo
+//! is a sibling, not a submodule, and the bundle may not exist in
+//! every developer checkout. With the feature off:
+//!
+//!   * `is_bundled()` returns `false`
+//!   * `router()` serves a 404 stub instructing operators how to
+//!     enable the bundle
+//!
+//! The api keeps booting either way — bundling failure must not take
+//! `/v1/*` down.
+//!
+//! Mounted by `server.rs` after the api routes so the SPA fallback
+//! never shadows a real `/v1/*` handler.
+
 use axum::{
-    http::{header, StatusCode, Uri},
+    body::Body,
+    extract::Path,
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Router,
 };
-use rust_embed::Embed;
-use tracing::info;
 
-/// Embed the dashboard static assets at compile time.
-#[derive(Embed)]
-#[folder = "dashboard/"]
+#[cfg(feature = "bundled-dashboard")]
+#[derive(rust_embed::Embed)]
+#[folder = "../node.dashboard.fluxx.vexarr.com/dist/"]
 struct DashboardAssets;
 
-/// Serve the embedded dashboard on a stable port (API port + 1).
-/// Returns the actual port the server bound to.
-pub async fn start_dashboard_server(api_port: u16) -> anyhow::Result<u16> {
-    let app = Router::new()
-        // Serve a dynamic config script that tells the SPA where the API is
-        .route("/config.js", get(move || async move {
-            let js = format!(
-                "window.__FLUXX_API_BASE__ = 'http://localhost:{}/v1';",
-                api_port
-            );
-            Response::builder()
-                .header(header::CONTENT_TYPE, "application/javascript")
-                .body(js)
-                .unwrap()
-        }))
-        // Root serves index.html
-        .route("/", get(serve_root))
-        // Everything else: try static file, then SPA fallback
-        .fallback(get(serve_any));
-
-    // Bind to API port + 1 for a stable, predictable URL
-    let dash_port = api_port + 1;
-    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", dash_port)).await {
-        Ok(l) => l,
-        Err(_) => {
-            // Fallback to random port if preferred port is taken
-            tokio::net::TcpListener::bind("0.0.0.0:0").await?
-        }
-    };
-    let port = listener.local_addr()?.port();
-
-    info!("Dashboard: Serving on http://localhost:{}", port);
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.ok();
-    });
-
-    Ok(port)
+/// Build the static-file router. Designed to be `.merge()`'d into
+/// the main `Router` *after* the `/v1/*` routes.
+pub fn router() -> Router {
+    Router::new()
+        .route("/", get(serve_index))
+        .route("/index.html", get(serve_index))
+        .route("/assets/:file", get(serve_asset))
+        .route("/favicon.ico", get(|| async { serve_path("favicon.ico") }))
+        .route(
+            "/manifest.webmanifest",
+            get(|| async { serve_path("manifest.webmanifest") }),
+        )
+        .route("/robots.txt", get(|| async { serve_path("robots.txt") }))
+        // SPA fallback: anything we don't have a real handler for and
+        // isn't an asset path renders the dashboard shell so the
+        // client-side router can take over.
+        .fallback(get(serve_spa_fallback))
 }
 
-/// Fallback handler: uses the full URI path to find embedded files.
-async fn serve_any(uri: Uri) -> impl IntoResponse {
-    let path = uri.path().trim_start_matches('/');
+async fn serve_index() -> Response {
+    serve_path("index.html")
+}
 
-    // Try exact file match
-    if !path.is_empty() {
-        if let Some(file) = DashboardAssets::get(path) {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            return Response::builder()
-                .header(header::CONTENT_TYPE, mime.as_ref())
-                .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-                .body(axum::body::Body::from(file.data.to_vec()))
-                .unwrap();
-        }
+async fn serve_asset(Path(file): Path<String>) -> Response {
+    let path = format!("assets/{}", file);
+    let mut resp = serve_path(&path).into_response();
+    if resp.status() == StatusCode::OK {
+        // Vite content-hashes asset filenames, so "immutable" is safe.
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
     }
-
-    // SPA fallback: serve index.html for any unmatched route
-    serve_index_html()
+    resp
 }
 
-/// Serve the root index.html with the config script injected.
-pub async fn serve_root() -> impl IntoResponse {
-    serve_index_html()
+async fn serve_spa_fallback() -> Response {
+    serve_path("index.html")
 }
 
-fn serve_index_html() -> Response {
-    match DashboardAssets::get("index.html") {
-        Some(file) => {
-            let html = String::from_utf8_lossy(&file.data);
-            // Inject config.js script before the closing </head> tag
-            let injected = html.replace(
-                "</head>",
-                r#"<script src="/config.js"></script></head>"#,
+#[cfg(feature = "bundled-dashboard")]
+fn serve_path(path: &str) -> Response {
+    match DashboardAssets::get(path) {
+        Some(content) => {
+            let ct = content_type_for(path);
+            let mut resp = Response::new(Body::from(content.data.into_owned()));
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(ct),
             );
-            Response::builder()
-                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                .header(header::CACHE_CONTROL, "no-cache")
-                .body(axum::body::Body::from(injected))
-                .unwrap()
+            resp
         }
-        None => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(axum::body::Body::from("Dashboard not found"))
-            .unwrap(),
+        None => not_found(),
+    }
+}
+
+#[cfg(not(feature = "bundled-dashboard"))]
+fn serve_path(_path: &str) -> Response {
+    not_bundled_stub()
+}
+
+#[cfg(feature = "bundled-dashboard")]
+fn not_found() -> Response {
+    let mut resp = Response::new(Body::from("Not Found"));
+    *resp.status_mut() = StatusCode::NOT_FOUND;
+    resp
+}
+
+#[cfg(not(feature = "bundled-dashboard"))]
+fn not_bundled_stub() -> Response {
+    let mut resp = Response::new(Body::from(
+        "Fluxx api is running but the dashboard bundle was not built into this binary.\n\
+         To enable, build the dashboard and rebuild with the feature on:\n  \
+           cd ../node.dashboard.fluxx.vexarr.com && npm install && npm run build\n  \
+           cargo build -p fluxx-api --features bundled-dashboard\n",
+    ));
+    *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    resp
+}
+
+/// `true` when the bundle was embedded at build time. Surfaced in the
+/// boot log so operators can see "dashboard bundled" / "dashboard
+/// missing" without having to curl the endpoint.
+#[cfg(feature = "bundled-dashboard")]
+pub fn is_bundled() -> bool {
+    DashboardAssets::iter().next().is_some()
+}
+
+#[cfg(not(feature = "bundled-dashboard"))]
+pub fn is_bundled() -> bool {
+    false
+}
+
+/// Minimal MIME-type lookup for the file extensions Vite emits.
+/// Inlined to avoid pulling `mime_guess` into fluxx-api.
+#[cfg(feature = "bundled-dashboard")]
+fn content_type_for(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "txt" => "text/plain; charset=utf-8",
+        "webmanifest" => "application/manifest+json",
+        "map" => "application/json",
+        _ => "application/octet-stream",
     }
 }

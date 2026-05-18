@@ -4,7 +4,7 @@
 //! When activated, a template registers its metrics for collection
 //! and returns the PromQL queries + chart config for the dashboard to render.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{
     extract::{State, Path},
     response::IntoResponse,
@@ -152,7 +152,7 @@ pub async fn get_template_data(
 
     let now_us = now_us();
     let lookback_us = 3600 * 1_000_000u64; // 1 hour
-    let window = crate::storage::event_store::TimeWindow::new(now_us.saturating_sub(lookback_us), now_us);
+    let window = fluxx_core::storage::event_store::TimeWindow::new(now_us.saturating_sub(lookback_us), now_us);
 
     let mut panel_data: Vec<serde_json::Value> = Vec::new();
 

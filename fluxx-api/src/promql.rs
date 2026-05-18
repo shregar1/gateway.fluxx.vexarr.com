@@ -11,8 +11,8 @@
 //!
 //! Endpoint: GET /v1/query?q=<promql>&lookback=<seconds>
 
-use crate::api::{ApiState, StandardResponse};
-use crate::storage::event_store::TimeWindow;
+use crate::{ApiState, StandardResponse};
+use fluxx_core::storage::event_store::TimeWindow;
 use axum::{
     extract::{State, Query},
     response::IntoResponse,

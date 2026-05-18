@@ -1,6 +1,6 @@
-use crate::api::{ApiState, StandardResponse};
-use crate::models::log_entry::{LogEntry, LogLevel};
-use crate::storage::log_store::LogQuery;
+use crate::{ApiState, StandardResponse};
+use fluxx_core::models::log_entry::{LogEntry, LogLevel};
+use fluxx_core::storage::log_store::LogQuery;
 use axum::{
     extract::{ws::{WebSocket, WebSocketUpgrade, Message}, State, Query},
     response::IntoResponse,

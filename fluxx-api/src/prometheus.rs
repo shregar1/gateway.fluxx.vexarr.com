@@ -6,8 +6,8 @@
 //! ## Usage
 //! Configure Prometheus to remote_write to `http://fluxx-host:7007/v1/prom/write`
 
-use crate::api::{ApiState, StandardResponse};
-use crate::models::metric::{Metric, MetricType};
+use crate::{ApiState, StandardResponse};
+use fluxx_core::models::metric::{Metric, MetricType};
 use axum::{
     extract::State,
     response::IntoResponse,

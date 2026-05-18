@@ -1,0 +1,23 @@
+[package]
+name = "fluxx-bin"
+version = "0.1.0"
+edition = "2021"
+authors = ["Fluxx Team <team@fluxx.dev>"]
+description = "The `fluxx` binary — glues fluxx-core's runtime to fluxx-api's HTTP surface."
+license = "Apache-2.0"
+repository = "https://github.com/fluxx/agent"
+rust-version = "1.95"
+
+# The binary lives in its own crate because Cargo refuses package
+# cycles: fluxx-core's library is api-agnostic, but fluxx-api depends
+# back on fluxx-core for primitives, so the binary that needs BOTH
+# can't sit inside either of them.
+[[bin]]
+name = "fluxx"
+path = "src/main.rs"
+
+[dependencies]
+fluxx-core = { path = "../fluxx-core", default-features = false }
+fluxx-api = { path = "../fluxx-api" }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }

@@ -2,7 +2,7 @@
 //! Tracks slow queries, explain plans, connection pool stats, and wait events.
 //! Receives data from database integrations and provides query analytics.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{extract::{State, Query}, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

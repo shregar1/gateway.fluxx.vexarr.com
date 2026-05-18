@@ -10,10 +10,26 @@ keywords = ["observability", "monitoring", "metrics", "logs", "tracing"]
 categories = ["development-tools", "network-programming"]
 rust-version = "1.95"
 
-# Explicit binary configuration - only includes src/main.rs, not tests
-[[bin]]
-name = "fluxx"
-path = "src/main.rs"
+# The `fluxx` binary lives in the sibling `fluxx-bin` crate. This
+# package now only ships the library — there is no `[[bin]]` here.
+
+[features]
+# The library has no required features. The `fluxx` binary lives in
+# the sibling `fluxx-bin` crate so the package can stay api-agnostic.
+default = []
+# off by default — fluxx-api carries its own gated copy of the
+# embedded dashboard router. Kept here for single-binary
+# distributions that build everything from a checkout including the
+# dashboard repo.
+bundled-dashboard = []
+# Bundle the install_agent.{sh,ps1} scripts at compile time. Off by
+# default because the scripts live in the release pipeline, not in
+# every developer checkout. Enabling without the assets present is
+# a hard compile error (include_str! is unconditional).
+bundled-install-scripts = []
+# Bundle the OpenClaw skill markdown for `fluxx openclaw init`. Off
+# by default — the file ships in the release artifact, not in source.
+bundled-openclaw = []
 
 [dependencies]
 urlencoding = "2"

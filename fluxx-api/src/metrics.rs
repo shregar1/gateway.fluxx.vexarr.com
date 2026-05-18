@@ -1,5 +1,5 @@
-use crate::api::{ApiState, StandardResponse};
-use crate::storage::event_store::TimeWindow;
+use crate::{ApiState, StandardResponse};
+use fluxx_core::storage::event_store::TimeWindow;
 use axum::{
     extract::{State, Query},
     response::IntoResponse,
@@ -100,10 +100,10 @@ pub async fn prometheus_endpoint(
 
         // Use the most recent metric's type for the TYPE line
         let prom_type = match metrics.last().map(|m| m.metric_type) {
-            Some(crate::models::metric::MetricType::Counter) => "counter",
-            Some(crate::models::metric::MetricType::Gauge) => "gauge",
-            Some(crate::models::metric::MetricType::Histogram) => "histogram",
-            Some(crate::models::metric::MetricType::Summary) => "summary",
+            Some(fluxx_core::models::metric::MetricType::Counter) => "counter",
+            Some(fluxx_core::models::metric::MetricType::Gauge) => "gauge",
+            Some(fluxx_core::models::metric::MetricType::Histogram) => "histogram",
+            Some(fluxx_core::models::metric::MetricType::Summary) => "summary",
             _ => "gauge",
         };
 

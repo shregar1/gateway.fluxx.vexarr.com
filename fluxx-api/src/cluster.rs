@@ -4,7 +4,7 @@
 //! across the Fluxx cluster. Leverages the existing gossip protocol
 //! and query federation infrastructure.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{
     extract::State,
     response::IntoResponse,

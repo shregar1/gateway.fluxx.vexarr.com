@@ -1,5 +1,5 @@
-use crate::api::{ApiState, StandardResponse};
-use crate::models::event::ProtocolType;
+use crate::{ApiState, StandardResponse};
+use fluxx_core::models::event::ProtocolType;
 use axum::{
     extract::State,
     response::IntoResponse,
@@ -69,7 +69,7 @@ pub async fn get_service_map(
 
         let is_error = matches!(
             event.severity,
-            crate::models::event::EventSeverity::High | crate::models::event::EventSeverity::Critical
+            fluxx_core::models::event::EventSeverity::High | fluxx_core::models::event::EventSeverity::Critical
         );
 
         // Update service node stats

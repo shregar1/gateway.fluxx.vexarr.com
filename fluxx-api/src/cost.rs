@@ -3,7 +3,7 @@
 //! Calculates what the user's current observability usage would cost on Datadog,
 //! New Relic, Splunk, and Grafana Cloud — then shows the savings with Fluxx.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{extract::State, response::IntoResponse};
 use serde::Serialize;
 use std::sync::Arc;

@@ -10,10 +10,10 @@
 //! GET /v1/rca — trigger RCA for current anomalies
 //! POST /v1/rca — trigger RCA for a specific time window
 
-use crate::api::{ApiState, StandardResponse};
-use crate::models::event::ProtocolType;
-use crate::storage::event_store::TimeWindow;
-use crate::storage::log_store::LogQuery;
+use crate::{ApiState, StandardResponse};
+use fluxx_core::models::event::ProtocolType;
+use fluxx_core::storage::event_store::TimeWindow;
+use fluxx_core::storage::log_store::LogQuery;
 use axum::{
     extract::{State, Query},
     response::IntoResponse,
@@ -136,7 +136,7 @@ async fn run_rca(state: Arc<ApiState>, req: RcaRequest) -> impl IntoResponse {
 
     // 2. Error logs
     let log_query = LogQuery {
-        level: Some(crate::models::log_entry::LogLevel::Error),
+        level: Some(fluxx_core::models::log_entry::LogLevel::Error),
         from_us: Some(from), to_us: Some(to),
         service: req.service.clone(),
         limit: 20, ..Default::default()
@@ -160,7 +160,7 @@ async fn run_rca(state: Arc<ApiState>, req: RcaRequest) -> impl IntoResponse {
     ).await;
     let error_spans: Vec<_> = events.iter()
         .filter(|e| e.timestamp_us >= from && e.timestamp_us <= to)
-        .filter(|e| matches!(e.severity, crate::models::event::EventSeverity::High | crate::models::event::EventSeverity::Critical))
+        .filter(|e| matches!(e.severity, fluxx_core::models::event::EventSeverity::High | fluxx_core::models::event::EventSeverity::Critical))
         .collect();
 
     for span in &error_spans {
@@ -203,16 +203,16 @@ async fn run_rca(state: Arc<ApiState>, req: RcaRequest) -> impl IntoResponse {
     let mut incident_id = None;
 
     if auto_incident && confidence > 0.7 && (severity == "critical" || severity == "high") {
-        let inc = crate::api::incidents::Incident {
+        let inc = crate::incidents::Incident {
             id: String::new(),
             title: format!("AI-RCA: {}", root_cause.summary),
             description: root_cause.detail.clone(),
             severity: if severity == "critical" {
-                crate::api::incidents::IncidentSeverity::Sev1
+                crate::incidents::IncidentSeverity::Sev1
             } else {
-                crate::api::incidents::IncidentSeverity::Sev2
+                crate::incidents::IncidentSeverity::Sev2
             },
-            status: crate::api::incidents::IncidentStatus::Open,
+            status: crate::incidents::IncidentStatus::Open,
             commander: None,
             services: services.iter().cloned().collect(),
             created_at_us: 0, updated_at_us: 0, resolved_at_us: None,

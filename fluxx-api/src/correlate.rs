@@ -6,10 +6,10 @@
 //!
 //! This is Fluxx's key differentiator — Datadog correlates poorly across signals.
 
-use crate::api::{ApiState, StandardResponse};
-use crate::models::event::ProtocolType;
-use crate::storage::event_store::TimeWindow;
-use crate::storage::log_store::LogQuery;
+use crate::{ApiState, StandardResponse};
+use fluxx_core::models::event::ProtocolType;
+use fluxx_core::storage::event_store::TimeWindow;
+use fluxx_core::storage::log_store::LogQuery;
 use axum::{
     extract::{State, Query},
     response::IntoResponse,
@@ -98,7 +98,7 @@ pub async fn correlate(
     for event in &events {
         if event.timestamp_us < from || event.timestamp_us > to { continue; }
         let is_error = matches!(event.severity,
-            crate::models::event::EventSeverity::High | crate::models::event::EventSeverity::Critical);
+            fluxx_core::models::event::EventSeverity::High | fluxx_core::models::event::EventSeverity::Critical);
         if !is_error { continue; }
 
         let meta = &event.metadata.extra;
@@ -120,7 +120,7 @@ pub async fn correlate(
 
     // 2. Query error logs
     let log_query = LogQuery {
-        level: Some(crate::models::log_entry::LogLevel::Error),
+        level: Some(fluxx_core::models::log_entry::LogLevel::Error),
         from_us: Some(from),
         to_us: Some(to),
         service: service_filter.clone(),

@@ -3,7 +3,7 @@
 //! Full incident lifecycle: create → acknowledge → investigate → resolve → postmortem.
 //! Tracks timeline of events, impacted services, and responders.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{
     extract::{State, Path},
     response::IntoResponse,

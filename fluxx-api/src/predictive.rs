@@ -7,8 +7,8 @@
 //! GET /v1/predict — forecast a metric's future value
 //! GET /v1/predict/alerts — list predicted threshold breaches
 
-use crate::api::{ApiState, StandardResponse};
-use crate::storage::event_store::TimeWindow;
+use crate::{ApiState, StandardResponse};
+use fluxx_core::storage::event_store::TimeWindow;
 use axum::{
     extract::{State, Query},
     response::IntoResponse,
@@ -140,7 +140,7 @@ pub async fn predicted_alerts(
 /// Compute forecast using linear regression on recent data points.
 fn compute_forecast(
     name: &str,
-    metrics: &[crate::models::metric::Metric],
+    metrics: &[fluxx_core::models::metric::Metric],
     hours_ahead: f64,
     threshold: Option<f64>,
 ) -> MetricForecast {
@@ -248,7 +248,7 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::metric::{Metric, MetricType};
+    use fluxx_core::models::metric::{Metric, MetricType};
 
     #[test]
     fn test_linear_forecast_increasing() {

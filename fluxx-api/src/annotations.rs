@@ -3,7 +3,7 @@
 //! Track CI/CD deployments as time-stamped markers for chart overlays.
 //! POST /v1/annotations to mark a deploy, GET /v1/annotations to list them.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{
     extract::{State, Query},
     response::IntoResponse,

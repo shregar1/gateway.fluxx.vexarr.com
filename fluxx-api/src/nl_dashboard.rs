@@ -7,7 +7,7 @@
 //! GET /v1/nl/query — translate natural language to PromQL
 //! POST /v1/nl/panel — create a dashboard panel from natural language
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{
     extract::{State, Query},
     response::IntoResponse,

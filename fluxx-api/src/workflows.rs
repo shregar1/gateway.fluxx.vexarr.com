@@ -2,7 +2,7 @@
 //! Trigger actions automatically when alerts fire or conditions are met.
 //! Examples: alert fires → create Jira ticket → notify Slack → page on-call.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{extract::{State, Path}, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

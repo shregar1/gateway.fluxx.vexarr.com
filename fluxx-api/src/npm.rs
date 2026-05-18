@@ -2,7 +2,7 @@
 //! Tracks TCP/UDP flows, DNS queries, and network latency between services.
 //! Receives flow data from eBPF or agent-collected network stats.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{extract::{State, Query}, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

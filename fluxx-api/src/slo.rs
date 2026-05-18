@@ -3,7 +3,7 @@
 //! Define error budget targets and track compliance over time.
 //! Example: 99.9% availability = 43.2 minutes of downtime per month allowed.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{
     extract::{State, Path},
     response::IntoResponse,

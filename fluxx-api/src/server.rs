@@ -1,5 +1,5 @@
-use crate::api::{ApiState, StandardResponse};
-use crate::models::event::Event;
+use crate::{ApiState, StandardResponse};
+use fluxx_core::models::event::Event;
 use axum::{
     extract::{ws::{WebSocket, WebSocketUpgrade, Message}, Path, State, Query},
     http::{HeaderMap, StatusCode, header},
@@ -34,7 +34,7 @@ async fn auth_middleware(
     request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if crate::security::bootstrap_token::is_disabled() {
+    if fluxx_core::security::bootstrap_token::is_disabled() {
         return Ok(next.run(request).await);
     }
 
@@ -49,7 +49,7 @@ async fn auth_middleware(
     }
 
     if let Some(token) = extract_token(&headers) {
-        if crate::security::bootstrap_token::verify_token(token) {
+        if fluxx_core::security::bootstrap_token::verify_token(token) {
             return Ok(next.run(request).await);
         }
     }
@@ -261,111 +261,113 @@ impl ApiServer {
             .route("/v1/stats", get(get_stats))
             .route("/v1/stream", get(stream_ws))
             // Log management endpoints
-            .route("/v1/logs", post(crate::api::logs::ingest_logs).get(crate::api::logs::query_logs))
-            .route("/v1/logs/stream", get(crate::api::logs::stream_logs_ws))
+            .route("/v1/logs", post(crate::logs::ingest_logs).get(crate::logs::query_logs))
+            .route("/v1/logs/stream", get(crate::logs::stream_logs_ws))
             // Metric query endpoints
-            .route("/v1/metrics", get(crate::api::metrics::query_metrics))
-            .route("/v1/metrics/names", get(crate::api::metrics::list_metric_names))
+            .route("/v1/metrics", get(crate::metrics::query_metrics))
+            .route("/v1/metrics/names", get(crate::metrics::list_metric_names))
             // Prometheus-compatible scrape endpoint
-            .route("/metrics", get(crate::api::metrics::prometheus_endpoint))
+            .route("/metrics", get(crate::metrics::prometheus_endpoint))
             // Service map endpoint
-            .route("/v1/service-map", get(crate::api::service_map::get_service_map))
+            .route("/v1/service-map", get(crate::service_map::get_service_map))
             // Deploy annotations
-            .route("/v1/annotations", post(crate::api::annotations::create_annotation).get(crate::api::annotations::list_annotations))
+            .route("/v1/annotations", post(crate::annotations::create_annotation).get(crate::annotations::list_annotations))
             // PromQL-compatible query engine
-            .route("/v1/query", get(crate::api::promql::query))
+            .route("/v1/query", get(crate::promql::query))
             // Trace detail API
-            .route("/v1/traces", get(crate::api::traces::list_traces))
-            .route("/v1/traces/:trace_id", get(crate::api::traces::get_trace))
+            .route("/v1/traces", get(crate::traces::list_traces))
+            .route("/v1/traces/:trace_id", get(crate::traces::get_trace))
             // SLO endpoints
-            .route("/v1/slos", post(crate::api::slo::create_slo).get(crate::api::slo::list_slos))
-            .route("/v1/slos/:id", get(crate::api::slo::get_slo))
+            .route("/v1/slos", post(crate::slo::create_slo).get(crate::slo::list_slos))
+            .route("/v1/slos/:id", get(crate::slo::get_slo))
             // Incidents
-            .route("/v1/incidents", post(crate::api::incidents::create_incident).get(crate::api::incidents::list_incidents))
-            .route("/v1/incidents/:id", get(crate::api::incidents::get_incident))
-            .route("/v1/incidents/:id/status", post(crate::api::incidents::update_incident_status))
+            .route("/v1/incidents", post(crate::incidents::create_incident).get(crate::incidents::list_incidents))
+            .route("/v1/incidents/:id", get(crate::incidents::get_incident))
+            .route("/v1/incidents/:id/status", post(crate::incidents::update_incident_status))
             // Notebooks
-            .route("/v1/notebooks", post(crate::api::notebooks::create_notebook).get(crate::api::notebooks::list_notebooks))
-            .route("/v1/notebooks/:id", get(crate::api::notebooks::get_notebook))
+            .route("/v1/notebooks", post(crate::notebooks::create_notebook).get(crate::notebooks::list_notebooks))
+            .route("/v1/notebooks/:id", get(crate::notebooks::get_notebook))
             // Workflows
-            .route("/v1/workflows", post(crate::api::workflows::create_workflow).get(crate::api::workflows::list_workflows))
-            .route("/v1/workflows/:id", get(crate::api::workflows::get_workflow))
+            .route("/v1/workflows", post(crate::workflows::create_workflow).get(crate::workflows::list_workflows))
+            .route("/v1/workflows/:id", get(crate::workflows::get_workflow))
             // Database Monitoring
-            .route("/v1/dbm/queries", post(crate::api::dbm::ingest_slow_query).get(crate::api::dbm::list_slow_queries))
-            .route("/v1/dbm/stats", get(crate::api::dbm::get_query_stats))
+            .route("/v1/dbm/queries", post(crate::dbm::ingest_slow_query).get(crate::dbm::list_slow_queries))
+            .route("/v1/dbm/stats", get(crate::dbm::get_query_stats))
             // CI/CD Visibility
-            .route("/v1/ci/pipelines", post(crate::api::ci::record_pipeline).get(crate::api::ci::list_pipelines))
-            .route("/v1/ci/dora", get(crate::api::ci::get_dora_metrics))
+            .route("/v1/ci/pipelines", post(crate::ci::record_pipeline).get(crate::ci::list_pipelines))
+            .route("/v1/ci/dora", get(crate::ci::get_dora_metrics))
             // Network Performance Monitoring
-            .route("/v1/network/flows", post(crate::api::npm::record_flow).get(crate::api::npm::list_flows))
-            .route("/v1/network/dns", post(crate::api::npm::record_dns))
-            .route("/v1/network/summary", get(crate::api::npm::network_summary))
+            .route("/v1/network/flows", post(crate::npm::record_flow).get(crate::npm::list_flows))
+            .route("/v1/network/dns", post(crate::npm::record_dns))
+            .route("/v1/network/summary", get(crate::npm::network_summary))
             // Real User Monitoring (RUM)
-            .route("/v1/rum", post(crate::api::rum::ingest_rum))
-            .route("/v1/rum/sessions", get(crate::api::rum::list_rum_sessions))
-            .route("/v1/rum/vitals", get(crate::api::rum::get_web_vitals))
-            .route("/v1/rum/stats", get(crate::api::rum::rum_stats))
+            .route("/v1/rum", post(crate::rum::ingest_rum))
+            .route("/v1/rum/sessions", get(crate::rum::list_rum_sessions))
+            .route("/v1/rum/vitals", get(crate::rum::get_web_vitals))
+            .route("/v1/rum/stats", get(crate::rum::rum_stats))
             // Error tracking
-            .route("/v1/errors", get(crate::api::errors::list_errors))
-            .route("/v1/errors/top", get(crate::api::errors::top_errors))
-            .route("/v1/errors/trend", get(crate::api::errors::errors_trend))
-            .route("/v1/errors/stats", get(crate::api::errors::errors_stats))
-            .route("/v1/errors/:fingerprint", get(crate::api::errors::get_error))
-            .route("/v1/errors/:fingerprint/latest-event", get(crate::api::errors::latest_event))
-            .route("/v1/errors/:fingerprint/events", get(crate::api::errors::list_events))
-            .route("/v1/errors/:fingerprint/resolve", post(crate::api::errors::resolve_error))
-            .route("/v1/errors/:fingerprint/mute", post(crate::api::errors::mute_error))
+            .route("/v1/errors", get(crate::errors::list_errors))
+            .route("/v1/errors/top", get(crate::errors::top_errors))
+            .route("/v1/errors/trend", get(crate::errors::errors_trend))
+            .route("/v1/errors/stats", get(crate::errors::errors_stats))
+            .route("/v1/errors/:fingerprint", get(crate::errors::get_error))
+            .route("/v1/errors/:fingerprint/latest-event", get(crate::errors::latest_event))
+            .route("/v1/errors/:fingerprint/events", get(crate::errors::list_events))
+            .route("/v1/errors/:fingerprint/resolve", post(crate::errors::resolve_error))
+            .route("/v1/errors/:fingerprint/mute", post(crate::errors::mute_error))
             // Sourcemap upload + list. The upload endpoint accepts a
             // multipart payload (`release`, `bundle_url`, `map`).
             .route(
                 "/v1/sourcemaps",
-                post(crate::api::sourcemaps::upload_sourcemap)
-                    .get(crate::api::sourcemaps::list_sourcemaps),
+                post(crate::sourcemaps::upload_sourcemap)
+                    .get(crate::sourcemaps::list_sourcemaps),
             )
             // Cloud Security Posture Management (CSPM)
-            .route("/v1/cspm/findings", post(crate::api::cspm::report_finding).get(crate::api::cspm::list_findings))
-            .route("/v1/cspm/compliance", get(crate::api::cspm::get_compliance))
-            .route("/v1/cspm/rules", get(crate::api::cspm::list_security_rules))
+            .route("/v1/cspm/findings", post(crate::cspm::report_finding).get(crate::cspm::list_findings))
+            .route("/v1/cspm/compliance", get(crate::cspm::get_compliance))
+            .route("/v1/cspm/rules", get(crate::cspm::list_security_rules))
             // Cost Analytics
-            .route("/v1/cost", get(crate::api::cost::cost_analysis))
+            .route("/v1/cost", get(crate::cost::cost_analysis))
             // Continuous Profiling
-            .route("/v1/profiling", post(crate::api::profiling::ingest_profile).get(crate::api::profiling::list_profiles))
-            .route("/v1/profiling/raw", post(crate::api::profiling::ingest_raw_profile))
-            .route("/v1/profiling/:id", get(crate::api::profiling::get_profile))
+            .route("/v1/profiling", post(crate::profiling::ingest_profile).get(crate::profiling::list_profiles))
+            .route("/v1/profiling/raw", post(crate::profiling::ingest_raw_profile))
+            .route("/v1/profiling/:id", get(crate::profiling::get_profile))
             // AI Root Cause Analysis
-            .route("/v1/rca", get(crate::api::ai_rca::analyze_root_cause).post(crate::api::ai_rca::trigger_rca))
+            .route("/v1/rca", get(crate::ai_rca::analyze_root_cause).post(crate::ai_rca::trigger_rca))
             // Natural Language Dashboard Builder
-            .route("/v1/nl/query", get(crate::api::nl_dashboard::nl_to_promql))
-            .route("/v1/nl/panel", post(crate::api::nl_dashboard::create_panel_from_nl))
+            .route("/v1/nl/query", get(crate::nl_dashboard::nl_to_promql))
+            .route("/v1/nl/panel", post(crate::nl_dashboard::create_panel_from_nl))
             // Predictive Alerting
-            .route("/v1/predict", get(crate::api::predictive::predict_metric))
-            .route("/v1/predict/alerts", get(crate::api::predictive::predicted_alerts))
+            .route("/v1/predict", get(crate::predictive::predict_metric))
+            .route("/v1/predict/alerts", get(crate::predictive::predicted_alerts))
             // Dashboard Templates
-            .route("/v1/templates", get(crate::api::templates::list_templates))
-            .route("/v1/templates/active", get(crate::api::templates::list_active_templates))
-            .route("/v1/templates/:id/activate", post(crate::api::templates::activate_template))
-            .route("/v1/templates/:id/deactivate", post(crate::api::templates::deactivate_template))
-            .route("/v1/templates/:id/data", get(crate::api::templates::get_template_data))
+            .route("/v1/templates", get(crate::templates::list_templates))
+            .route("/v1/templates/active", get(crate::templates::list_active_templates))
+            .route("/v1/templates/:id/activate", post(crate::templates::activate_template))
+            .route("/v1/templates/:id/deactivate", post(crate::templates::deactivate_template))
+            .route("/v1/templates/:id/data", get(crate::templates::get_template_data))
             // Correlation Engine
-            .route("/v1/correlate", get(crate::api::correlate::correlate))
+            .route("/v1/correlate", get(crate::correlate::correlate))
             // Change Intelligence
-            .route("/v1/changes", post(crate::api::changes::record_change).get(crate::api::changes::list_changes))
-            .route("/v1/changes/regressions", get(crate::api::changes::detect_regressions))
+            .route("/v1/changes", post(crate::changes::record_change).get(crate::changes::list_changes))
+            .route("/v1/changes/regressions", get(crate::changes::detect_regressions))
             // Data Pipelines
-            .route("/v1/pipelines", post(crate::api::pipelines::create_pipeline).get(crate::api::pipelines::list_pipelines))
-            .route("/v1/pipelines/:id", get(crate::api::pipelines::get_pipeline).delete(crate::api::pipelines::delete_pipeline))
+            .route("/v1/pipelines", post(crate::pipelines::create_pipeline).get(crate::pipelines::list_pipelines))
+            .route("/v1/pipelines/:id", get(crate::pipelines::get_pipeline).delete(crate::pipelines::delete_pipeline))
             // Quotas & Rate Limiting
-            .route("/v1/quotas", post(crate::api::quotas::set_quota).get(crate::api::quotas::list_quotas))
-            .route("/v1/quotas/:project_id/usage", get(crate::api::quotas::get_usage))
+            .route("/v1/quotas", post(crate::quotas::set_quota).get(crate::quotas::list_quotas))
+            .route("/v1/quotas/:project_id/usage", get(crate::quotas::get_usage))
             // Cluster status
-            .route("/v1/cluster", get(crate::api::cluster::cluster_status))
-            .route("/v1/cluster/topology", get(crate::api::cluster::cluster_topology))
+            .route("/v1/cluster", get(crate::cluster::cluster_status))
+            .route("/v1/cluster/topology", get(crate::cluster::cluster_topology))
             // Prometheus remote_write endpoint
-            .route("/v1/prom/write", post(crate::protocols::prometheus::remote_write))
-            // OTLP HTTP ingestion endpoints
-            .route("/v1/otlp/traces", post(crate::protocols::otlp::http_handlers::ingest_traces))
-            .route("/v1/otlp/metrics", post(crate::protocols::otlp::http_handlers::ingest_metrics))
-            .route("/v1/otlp/logs", post(crate::protocols::otlp::http_handlers::ingest_logs))
+            .route("/v1/prom/write", post(crate::prometheus::remote_write))
+            // OTLP HTTP ingestion endpoints — handlers live in
+            // fluxx-api (they need ApiState). The fluxx-core protocols
+            // crate only carries the raw OTLP gRPC + HTTP servers.
+            .route("/v1/otlp/traces", post(crate::otlp_http_handlers::ingest_traces))
+            .route("/v1/otlp/metrics", post(crate::otlp_http_handlers::ingest_metrics))
+            .route("/v1/otlp/logs", post(crate::otlp_http_handlers::ingest_logs))
             .layer(middleware::from_fn(security_headers_middleware))
             .layer(middleware::from_fn(auth_middleware))
             .layer(cors)
@@ -374,21 +376,21 @@ impl ApiServer {
         info!("API: Binding Fluxx layer to {} (auth required if configured)", self.addr);
         let listener = tokio::net::TcpListener::bind(&self.addr).await?;
     // Mount install endpoints (gateway-streamed installer + binary download).
-    let install_state = std::sync::Arc::new(crate::install::InstallState::new());
-    let app = crate::install::router(install_state).merge(app);
+    let install_state = std::sync::Arc::new(fluxx_core::install::InstallState::new());
+    let app = fluxx_core::install::router(install_state).merge(app);
 
     // Mount the embedded per-node dashboard *after* the API routes so
     // its SPA fallback never shadows a real `/v1/*` handler. The
     // dashboard is bundled at compile time; if it wasn't built, the
     // router serves a one-line hint instead of a blank page.
-    if crate::dashboard_assets::is_bundled() {
+    if crate::dashboard::is_bundled() {
         info!("API: Dashboard bundle embedded — serving at http://{}/", self.addr);
     } else {
         info!(
             "API: Dashboard bundle NOT embedded. Build with:\n  cd node.dashboard.fluxx.dev && npm run build && cd .. && cargo build"
         );
     }
-    let app = app.merge(crate::dashboard_assets::router());
+    let app = app.merge(crate::dashboard::router());
 
         axum::serve(listener, app).await?;
         Ok(())
@@ -437,30 +439,30 @@ async fn list_events(
     
     let protocol_enum = protocol.and_then(|p| {
         match p.to_lowercase().as_str() {
-            "http" => Some(crate::models::event::ProtocolType::Http),
-            "ws" => Some(crate::models::event::ProtocolType::Ws),
-            "tcp" => Some(crate::models::event::ProtocolType::Tcp),
-            "udp" => Some(crate::models::event::ProtocolType::Udp),
-            "grpc" => Some(crate::models::event::ProtocolType::Grpc),
-            "quic" => Some(crate::models::event::ProtocolType::Quic),
-            "ebpf" => Some(crate::models::event::ProtocolType::Ebpf),
-            "mqtt" => Some(crate::models::event::ProtocolType::Mqtt),
-            "modbus" => Some(crate::models::event::ProtocolType::Modbus),
-            "system" => Some(crate::models::event::ProtocolType::System),
-            "otlp" => Some(crate::models::event::ProtocolType::Otlp),
-            "statsd" => Some(crate::models::event::ProtocolType::StatsD),
-            "log" => Some(crate::models::event::ProtocolType::Log),
+            "http" => Some(fluxx_core::models::event::ProtocolType::Http),
+            "ws" => Some(fluxx_core::models::event::ProtocolType::Ws),
+            "tcp" => Some(fluxx_core::models::event::ProtocolType::Tcp),
+            "udp" => Some(fluxx_core::models::event::ProtocolType::Udp),
+            "grpc" => Some(fluxx_core::models::event::ProtocolType::Grpc),
+            "quic" => Some(fluxx_core::models::event::ProtocolType::Quic),
+            "ebpf" => Some(fluxx_core::models::event::ProtocolType::Ebpf),
+            "mqtt" => Some(fluxx_core::models::event::ProtocolType::Mqtt),
+            "modbus" => Some(fluxx_core::models::event::ProtocolType::Modbus),
+            "system" => Some(fluxx_core::models::event::ProtocolType::System),
+            "otlp" => Some(fluxx_core::models::event::ProtocolType::Otlp),
+            "statsd" => Some(fluxx_core::models::event::ProtocolType::StatsD),
+            "log" => Some(fluxx_core::models::event::ProtocolType::Log),
             _ => None,
         }
     });
 
     let severity_enum = severity.and_then(|s| {
         match s.to_lowercase().as_str() {
-            "info" => Some(crate::models::event::EventSeverity::Info),
-            "low" => Some(crate::models::event::EventSeverity::Low),
-            "medium" => Some(crate::models::event::EventSeverity::Medium),
-            "high" => Some(crate::models::event::EventSeverity::High),
-            "critical" => Some(crate::models::event::EventSeverity::Critical),
+            "info" => Some(fluxx_core::models::event::EventSeverity::Info),
+            "low" => Some(fluxx_core::models::event::EventSeverity::Low),
+            "medium" => Some(fluxx_core::models::event::EventSeverity::Medium),
+            "high" => Some(fluxx_core::models::event::EventSeverity::High),
+            "critical" => Some(fluxx_core::models::event::EventSeverity::Critical),
             _ => None,
         }
     });

@@ -1,7 +1,7 @@
 //! Notebooks — Collaborative investigation documents with embedded queries.
 //! Like Datadog Notebooks: mix markdown, charts, and live queries in one document.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{extract::{State, Path}, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -53,6 +53,13 @@ pub mod integrations;
 // Embedded per-node dashboard. The Vite-built bundle in
 // `node.dashboard.fluxx.dev/dist/` is compiled into the binary so a
 // self-hosted user only runs one process.
+//
+// Gated behind the `bundled-dashboard` feature because the dashboard
+// is a sibling repo and may not be present on every checkout. The
+// HTTP layer (fluxx-api) has its own copy of the embed logic and
+// degrades to a 404 stub when the feature is off, so the agent boots
+// regardless.
+#[cfg(feature = "bundled-dashboard")]
 pub mod dashboard_assets;
 
 // Re-exports
@@ -60,4 +67,5 @@ pub use core::Agent;
 pub use core::traits::{Capturer, Processor, Transporter, Protocol};
 pub use models::event::{Event, ProtocolType};
 pub use config::Config;
+pub use core::context::RuntimeContext;
 pub use core::runtime::{AgentService, Lifecycle};

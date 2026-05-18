@@ -4,7 +4,7 @@
 //! Supports pprof format (Go), JFR (Java), and generic flamegraph JSON.
 //! Stores profiles and provides query APIs for analysis.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{extract::{State, Query, Path}, response::IntoResponse, Json, body::Bytes};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -1,7 +1,7 @@
 //! CI/CD Visibility — Pipeline execution tracing and test analytics.
 //! Tracks pipeline runs, stage durations, test results, and deployment frequency.
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{extract::{State, Query}, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -173,7 +173,21 @@ pub enum OpenclawSubcommands {
     Status,
 }
 
-pub async fn run() -> anyhow::Result<()> {
+/// CLI entry point.
+///
+/// `start_handler` is invoked for the `fluxx start` subcommand only.
+/// The binary (`fluxx-core/src/main.rs`) plugs in a closure that
+/// constructs the `RuntimeContext` via `AgentService::prepare_runtime`,
+/// hands it to `fluxx_api::build_api(ctx, addr)`, and joins both
+/// futures. Keeping the handler injected this way is what lets the
+/// `cli` module live in `fluxx-core` without taking a dependency on
+/// `fluxx-api` (which would re-create the cycle this whole split is
+/// designed to eliminate).
+pub async fn run<F, Fut>(start_handler: F) -> anyhow::Result<()>
+where
+    F: FnOnce(AgentService, Config) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
     init_logging();
     let cli = Cli::parse();
     // Bootstrap the admin token before we mount the auth middleware.
@@ -184,7 +198,7 @@ pub async fn run() -> anyhow::Result<()> {
     if !matches!(cli.command, Commands::Errors(_) | Commands::Release(_) | Commands::Verify(_) | Commands::Init(_) | Commands::Register(_)) {
         info!("Auth bootstrap: {:?}", auth_outcome);
     }
-    let mut service = AgentService::new();
+    let service = AgentService::new();
 
     let requires_license = matches!(cli.command, Commands::Dev | Commands::Start { .. } | Commands::Mesh(_));
 
@@ -226,7 +240,10 @@ pub async fn run() -> anyhow::Result<()> {
             print_banner(&info);
 
             let mut dev = DevManager::new();
-            dev.run().await?;
+            // Pass the same start handler the binary plugs in for
+            // `fluxx start`. Dev mode and start now share the
+            // agent+api glue (see `DevManager::run`).
+            dev.run(start_handler).await?;
 
             print_shutdown();
         }
@@ -239,7 +256,11 @@ pub async fn run() -> anyhow::Result<()> {
                 Some(path) => Config::load_from_path(&path).unwrap_or_default(),
                 None => Config::load().unwrap_or_default(),
             };
-            service.run_agent(cfg).await?;
+            // Delegate to the binary's start handler, which owns the
+            // wiring between `AgentService::prepare_runtime` and
+            // `fluxx_api::build_api`. cli stays api-agnostic so
+            // fluxx-core never reaches back into fluxx-api.
+            start_handler(service, cfg).await?;
 
             print_shutdown();
         }
@@ -306,8 +327,18 @@ pub async fn run() -> anyhow::Result<()> {
                     let skills_dir = safe_path.join("skills/fluxx_observability");
                     std::fs::create_dir_all(&skills_dir)?;
                     
-                    // Write SKILL.md (simplified version here, ideally read from resources)
-                    let skill_content = include_str!("../../extensions/openclaw/fluxx_observability/SKILL.md");
+                    // Write SKILL.md. The skill markdown ships in the
+                    // release artifact (extensions/openclaw/...), not
+                    // in every developer checkout, so we feature-gate
+                    // the include_str!. When the feature is off, fall
+                    // back to a minimal placeholder so the command still
+                    // runs and operators can fill it in by hand.
+                    #[cfg(feature = "bundled-openclaw")]
+                    let skill_content: &str =
+                        include_str!("../../extensions/openclaw/fluxx_observability/SKILL.md");
+                    #[cfg(not(feature = "bundled-openclaw"))]
+                    let skill_content: &str =
+                        "# Fluxx OpenClaw Skill (stub)\n\nThis build was compiled without `--features bundled-openclaw`.\nReplace this file with the canonical SKILL.md from the fluxx release artifact.\n";
                     std::fs::write(skills_dir.join("SKILL.md"), skill_content)?;
                     
                     // Write HEARTBEAT.md

@@ -1,5 +1,5 @@
-use crate::api::{ApiState, StandardResponse};
-use crate::protocols::otlp::convert;
+use crate::{ApiState, StandardResponse};
+use fluxx_core::protocols::otlp::convert;
 use axum::{
     extract::State,
     response::IntoResponse,

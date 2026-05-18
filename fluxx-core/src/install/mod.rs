@@ -32,8 +32,21 @@ const METADATA_TOKEN_URL: &str =
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const TOKEN_REFRESH_SLACK_SECS: u64 = 60;
 
+// The install scripts live under `fluxx-core/assets/install/` in the
+// release pipeline but aren't checked into source. When the
+// `bundled-install-scripts` feature is off (the default) we serve a
+// minimal stub from `/install_agent.sh` and `/install_agent.ps1` so
+// the route still resolves; CI builds for releases turn the feature
+// on so a real curl|sh installer is embedded.
+#[cfg(feature = "bundled-install-scripts")]
 const INSTALL_AGENT_SH: &str = include_str!("../../assets/install/install_agent.sh");
+#[cfg(feature = "bundled-install-scripts")]
 const INSTALL_AGENT_PS1: &str = include_str!("../../assets/install/install_agent.ps1");
+
+#[cfg(not(feature = "bundled-install-scripts"))]
+const INSTALL_AGENT_SH: &str = "#!/bin/sh\necho 'fluxx: install script not bundled in this build' >&2\nexit 1\n";
+#[cfg(not(feature = "bundled-install-scripts"))]
+const INSTALL_AGENT_PS1: &str = "Write-Error 'fluxx: install script not bundled in this build'\nexit 1\n";
 
 #[derive(Default)]
 struct TokenCache {

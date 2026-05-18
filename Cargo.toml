@@ -3,6 +3,11 @@ resolver = "2"
 members = [
     "fluxx-core",
     "fluxx-api",
+    # fluxx-bin owns the `fluxx` binary. Lives in its own package
+    # so it can depend on BOTH fluxx-core and fluxx-api without
+    # tripping Cargo's package-level cycle check (fluxx-api already
+    # depends back on fluxx-core).
+    "fluxx-bin",
 ]
 
 # Shared profile defaults — keep release builds reasonable and

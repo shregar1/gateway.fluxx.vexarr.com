@@ -3,7 +3,7 @@
 //! Tracks config/infra changes and correlates them with performance regressions.
 //! "Response time increased 40% — likely cause: deployment abc123 12 min ago."
 
-use crate::api::{ApiState, StandardResponse};
+use crate::{ApiState, StandardResponse};
 use axum::{
     extract::{State, Query},
     response::IntoResponse,
@@ -126,10 +126,10 @@ pub async fn detect_regressions(
 
     // Check each metric for significant changes
     if let Ok(names) = state.metric_store.get_names().await {
-        let before_window = crate::storage::event_store::TimeWindow::new(
+        let before_window = fluxx_core::storage::event_store::TimeWindow::new(
             now.saturating_sub(lookback_us * 2), now.saturating_sub(lookback_us),
         );
-        let after_window = crate::storage::event_store::TimeWindow::new(
+        let after_window = fluxx_core::storage::event_store::TimeWindow::new(
             now.saturating_sub(lookback_us), now,
         );
 
