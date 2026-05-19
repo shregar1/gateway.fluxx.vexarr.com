@@ -8,6 +8,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # AUTH_URL is required at build time (compile fails without it). CI
+  # builds in passthrough mode so the test suite never reaches out to
+  # a real auth host. Release builds in deploy workflows must set this
+  # to the canonical prod URL (e.g. https://auth.vexarr.com).
+  AUTH_URL: ""
 
 jobs:
   build:

@@ -31,35 +31,99 @@ use tracing::{info, error};
 ///     authenticated ingest set `FLUXX_REQUIRE_INGEST_AUTH=true`.
 async fn auth_middleware(
     headers: HeaderMap,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if fluxx_core::security::bootstrap_token::is_disabled() {
-        return Ok(next.run(request).await);
-    }
+    // URL-based auth: path-prefix `/k/<KEY>/...` is rewritten to its
+    // canonical path here, with the extracted key handed downstream as
+    // the token. Clients that cannot set headers (embedded devices,
+    // `<img>` beacons, certain telemetry SDKs) can authenticate by
+    // building the key into the URL. See docs/INGEST.md.
+    let path_token = strip_path_token(&mut request);
 
     let path = request.uri().path();
     if is_public_path(path) {
         return Ok(next.run(request).await);
     }
-    if is_ingest_path(path)
-        && std::env::var("FLUXX_REQUIRE_INGEST_AUTH").is_err()
-    {
-        return Ok(next.run(request).await);
-    }
+    let ingest_optional = is_ingest_path(path)
+        && std::env::var("FLUXX_REQUIRE_INGEST_AUTH").is_err();
 
-    if let Some(token) = extract_token(&headers) {
-        if fluxx_core::security::bootstrap_token::verify_token(token) {
+    // Resolve token from any URL/header mechanism. Precedence:
+    //   1. /k/<KEY>/ path prefix (rewritten above)
+    //   2. Authorization: Bearer <KEY>
+    //   3. Authorization: Basic base64(<KEY>:)   ← userinfo URL auth
+    //   4. X-API-Key: <KEY>
+    let token = path_token.or_else(|| extract_token(&headers));
+
+    if let Some(t) = &token {
+        if fluxx_core::security::bootstrap_token::verify_token(t) {
             return Ok(next.run(request).await);
         }
+        // Token was provided but wrong — always fail closed, even on
+        // ingest paths. Submitting a *bad* key is intent to authenticate;
+        // we shouldn't silently let it through.
+        error!(path = %path, "Unauthorized API access attempt (bad token)");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // No token. Anonymous ingest is allowed unless the operator opted in.
+    if ingest_optional {
+        return Ok(next.run(request).await);
     }
 
     error!(path = %path, "Unauthorized API access attempt");
     Err(StatusCode::UNAUTHORIZED)
 }
 
+/// If the URL starts with `/k/<KEY>/<rest>`, strip the prefix in place
+/// and return the key. Used so that
+///   POST /k/flx_live_abc/v1/traces?x=1
+/// becomes routed as
+///   POST /v1/traces?x=1
+/// with `flx_live_abc` extracted as the bearer token. This is the
+/// "URL-only" auth mechanism for clients that cannot configure
+/// arbitrary headers.
+fn strip_path_token(request: &mut axum::extract::Request) -> Option<String> {
+    // Pull the bits we need out of the existing URI into owned strings
+    // up front, so the subsequent `request.uri_mut()` mutable borrow
+    // doesn't collide with the immutable borrows of `path` / `query`.
+    let (key, path_and_query) = {
+        let uri = request.uri();
+        let path = uri.path();
+        let rest = path.strip_prefix("/k/")?;
+        let slash = rest.find('/')?;
+        let key = &rest[..slash];
+        if key.is_empty() {
+            return None;
+        }
+        let remaining = &rest[slash..]; // includes leading '/'
+        let pq = match uri.query() {
+            Some(q) => format!("{}?{}", remaining, q),
+            None => remaining.to_string(),
+        };
+        (key.to_string(), pq)
+    };
+
+    // Rebuild the URI preserving scheme/authority where present.
+    let mut parts = request.uri().clone().into_parts();
+    parts.path_and_query = path_and_query.parse().ok();
+    if let Ok(new_uri) = axum::http::Uri::from_parts(parts) {
+        *request.uri_mut() = new_uri;
+    } else if let Ok(uri) = path_and_query.parse::<axum::http::Uri>() {
+        // Fall back to a relative URI if from_parts rejects (e.g. had
+        // a scheme but no authority). Path-only URIs are valid in
+        // server-side handling.
+        *request.uri_mut() = uri;
+    }
+    Some(key)
+}
+
 fn is_public_path(path: &str) -> bool {
-    if path == "/" || path == "/index.html" || path == "/v1/status" {
+    // /v1/auth/verify is intentionally public — it's the endpoint the
+    // dashboard hits BEFORE it has a known-good key. The handler itself
+    // re-validates against keyx (or accepts in dev-passthrough mode);
+    // the gateway middleware just lets the request through.
+    if path == "/" || path == "/index.html" || path == "/v1/status" || path == "/v1/auth/verify" {
         return true;
     }
     if path.starts_with("/assets/") {
@@ -85,13 +149,39 @@ fn is_ingest_path(path: &str) -> bool {
     ) || path.starts_with("/v1/otlp/")
 }
 
-fn extract_token(headers: &HeaderMap) -> Option<&str> {
+/// Extract the API key from one of the supported HTTP auth headers:
+///
+/// * `Authorization: Bearer <KEY>` — preferred (OTel SDKs / dashboards)
+/// * `Authorization: Basic base64(<KEY>:)` — what every HTTP client
+///   sends when the URL has userinfo (e.g. `https://flx_KEY@gateway/...`).
+///   Treat the username as the key; the password slot is ignored. If
+///   the username is empty, fall back to the password — some libraries
+///   put the secret there.
+/// * `X-API-Key: <KEY>` — convenience header.
+///
+/// Returns an owned `String` because Basic decoding allocates.
+fn extract_token(headers: &HeaderMap) -> Option<String> {
     if let Some(v) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
         if let Some(rest) = v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")) {
-            return Some(rest.trim());
+            return Some(rest.trim().to_string());
+        }
+        if let Some(b64) = v.strip_prefix("Basic ").or_else(|| v.strip_prefix("basic ")) {
+            use base64::engine::general_purpose::STANDARD;
+            use base64::Engine;
+            if let Ok(decoded) = STANDARD.decode(b64.trim()) {
+                if let Ok(s) = std::str::from_utf8(&decoded) {
+                    let (user, pass) = s.split_once(':').unwrap_or((s, ""));
+                    let key = if !user.is_empty() { user } else { pass };
+                    if !key.is_empty() {
+                        return Some(key.to_string());
+                    }
+                }
+            }
         }
     }
-    headers.get("X-API-Key").and_then(|v| v.to_str().ok())
+    headers.get("X-API-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
 }
 
 /// Security middleware: Add security headers
@@ -254,17 +344,34 @@ impl ApiServer {
         let cors = build_cors_layer()?;
 
         let app = Router::new()
+            // Auth — the gateway is the single point of contact for
+            // the dashboard's key validation. It forwards to keyx
+            // (when configured) or accepts in dev-passthrough mode.
+            // Dashboards never call keyx directly.
+            .route("/v1/auth/verify", post(crate::auth::verify_api_key))
             .route("/v1/sessions", get(list_sessions))
             .route("/v1/sessions/:id", get(get_session))
             .route("/v1/anomalies", get(list_anomalies))
             .route("/v1/events", post(ingest_event).get(list_events))
             .route("/v1/stats", get(get_stats))
             .route("/v1/stream", get(stream_ws))
-            // Log management endpoints
-            .route("/v1/logs", post(crate::logs::ingest_logs).get(crate::logs::query_logs))
+            // Canonical OTel/Datadog/Grafana/Splunk ingestion path.
+            // POST is the content-negotiating dispatcher: it accepts
+            // OTLP HTTP/JSON (`{resourceLogs: [...]}`) and the
+            // fluxx-native LogEntry array on the same URL so every
+            // upstream SDK works without per-vendor path tweaks.
+            // GET continues to query the log store.
+            .route("/v1/logs", post(crate::ingest::ingest_logs).get(crate::logs::query_logs))
+            // Fluxx-native shape only — kept for callers that want the
+            // strict-array contract and don't want the dispatcher's
+            // content sniff. Same handler, no shape branching.
+            .route("/v1/logs/raw", post(crate::logs::ingest_logs))
             .route("/v1/logs/stream", get(crate::logs::stream_logs_ws))
-            // Metric query endpoints
-            .route("/v1/metrics", get(crate::metrics::query_metrics))
+            // Metrics: GET queries the metric store, POST accepts OTLP
+            // HTTP/JSON — same URL every OTel SDK is preconfigured for.
+            .route("/v1/metrics",
+                   get(crate::metrics::query_metrics)
+                       .post(crate::otlp_http_handlers::ingest_metrics))
             .route("/v1/metrics/names", get(crate::metrics::list_metric_names))
             // Prometheus-compatible scrape endpoint
             .route("/metrics", get(crate::metrics::prometheus_endpoint))
@@ -274,8 +381,11 @@ impl ApiServer {
             .route("/v1/annotations", post(crate::annotations::create_annotation).get(crate::annotations::list_annotations))
             // PromQL-compatible query engine
             .route("/v1/query", get(crate::promql::query))
-            // Trace detail API
-            .route("/v1/traces", get(crate::traces::list_traces))
+            // Traces: GET lists/searches stored traces, POST accepts
+            // OTLP HTTP/JSON so every OTel SDK is a drop-in producer.
+            .route("/v1/traces",
+                   get(crate::traces::list_traces)
+                       .post(crate::otlp_http_handlers::ingest_traces))
             .route("/v1/traces/:trace_id", get(crate::traces::get_trace))
             // SLO endpoints
             .route("/v1/slos", post(crate::slo::create_slo).get(crate::slo::list_slos))
@@ -362,9 +472,11 @@ impl ApiServer {
             .route("/v1/cluster/topology", get(crate::cluster::cluster_topology))
             // Prometheus remote_write endpoint
             .route("/v1/prom/write", post(crate::prometheus::remote_write))
-            // OTLP HTTP ingestion endpoints — handlers live in
-            // fluxx-api (they need ApiState). The fluxx-core protocols
-            // crate only carries the raw OTLP gRPC + HTTP servers.
+            // Legacy `/v1/otlp/*` aliases — kept so existing fluxx
+            // deployments using the old paths keep working. New
+            // deployments should point at the canonical `/v1/{traces,
+            // metrics,logs}` routes above, which match the
+            // OTEL_EXPORTER_OTLP_ENDPOINT contract every SDK uses.
             .route("/v1/otlp/traces", post(crate::otlp_http_handlers::ingest_traces))
             .route("/v1/otlp/metrics", post(crate::otlp_http_handlers::ingest_metrics))
             .route("/v1/otlp/logs", post(crate::otlp_http_handlers::ingest_logs))
@@ -502,3 +614,121 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<ApiState>, filters: std
         }
     }
 }
+
+#[cfg(test)]
+mod url_auth_tests {
+    //! URL-based auth — both mechanisms are tested at the unit level so
+    //! we pin the exact path-rewrite + header-decode behaviour. The
+    //! middleware-level wiring is covered by the e2e smoke that fires
+    //! real requests in `tests/`.
+
+    use super::{extract_token, strip_path_token};
+    use axum::body::Body;
+    use axum::http::{HeaderMap, HeaderValue, Request};
+
+    fn req(uri: &str) -> Request<Body> {
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
+    // ── /k/<KEY>/... path-prefix ───────────────────────────────────
+
+    #[test]
+    fn path_prefix_extracts_key_and_rewrites_path() {
+        let mut r = req("/k/flx_live_abc123/v1/traces");
+        let key = strip_path_token(&mut r);
+        assert_eq!(key.as_deref(), Some("flx_live_abc123"));
+        assert_eq!(r.uri().path(), "/v1/traces");
+    }
+
+    #[test]
+    fn path_prefix_preserves_query_string() {
+        let mut r = req("/k/secret/v1/logs?level=error&service=foo");
+        let key = strip_path_token(&mut r);
+        assert_eq!(key.as_deref(), Some("secret"));
+        assert_eq!(r.uri().path(), "/v1/logs");
+        assert_eq!(r.uri().query(), Some("level=error&service=foo"));
+    }
+
+    #[test]
+    fn no_prefix_returns_none_and_leaves_uri_alone() {
+        let mut r = req("/v1/traces");
+        assert!(strip_path_token(&mut r).is_none());
+        assert_eq!(r.uri().path(), "/v1/traces");
+    }
+
+    #[test]
+    fn empty_key_in_prefix_is_rejected() {
+        let mut r = req("/k//v1/traces");
+        assert!(strip_path_token(&mut r).is_none());
+        // URI is intentionally not rewritten on rejection.
+        assert_eq!(r.uri().path(), "/k//v1/traces");
+    }
+
+    #[test]
+    fn prefix_without_trailing_path_is_rejected() {
+        let mut r = req("/k/onlykey");
+        assert!(strip_path_token(&mut r).is_none());
+    }
+
+    // ── Authorization header parsing ───────────────────────────────
+
+    fn hdr(name: &str, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn bearer_token_is_extracted() {
+        let h = hdr("authorization", "Bearer flx_live_abc");
+        assert_eq!(extract_token(&h).as_deref(), Some("flx_live_abc"));
+    }
+
+    #[test]
+    fn bearer_case_insensitive_prefix() {
+        let h = hdr("authorization", "bearer flx_live_abc");
+        assert_eq!(extract_token(&h).as_deref(), Some("flx_live_abc"));
+    }
+
+    #[test]
+    fn x_api_key_is_extracted() {
+        let h = hdr("x-api-key", "flx_live_xyz");
+        assert_eq!(extract_token(&h).as_deref(), Some("flx_live_xyz"));
+    }
+
+    /// HTTP Basic auth — the canonical URL-userinfo mechanism. A client
+    /// hitting `https://flx_KEY@gateway/v1/traces` automatically sends
+    /// `Authorization: Basic base64(flx_KEY:)`. Username = key, password
+    /// is unused.
+    #[test]
+    fn basic_userinfo_username_is_extracted() {
+        // base64("flx_live_user:") = "Zmx4X2xpdmVfdXNlcjo="
+        let h = hdr("authorization", "Basic Zmx4X2xpdmVfdXNlcjo=");
+        assert_eq!(extract_token(&h).as_deref(), Some("flx_live_user"));
+    }
+
+    /// Some HTTP libraries put the secret in the password slot
+    /// (`https://:flx_KEY@gateway/...`). We accept that too.
+    #[test]
+    fn basic_userinfo_password_fallback() {
+        // base64(":flx_live_pass") = "OmZseF9saXZlX3Bhc3M="
+        let h = hdr("authorization", "Basic OmZseF9saXZlX3Bhc3M=");
+        assert_eq!(extract_token(&h).as_deref(), Some("flx_live_pass"));
+    }
+
+    #[test]
+    fn basic_garbage_returns_none() {
+        let h = hdr("authorization", "Basic !!!not-base64!!!");
+        assert!(extract_token(&h).is_none());
+    }
+
+    #[test]
+    fn no_auth_header_returns_none() {
+        let h = HeaderMap::new();
+        assert!(extract_token(&h).is_none());
+    }
+}
+

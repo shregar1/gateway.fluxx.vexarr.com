@@ -10,17 +10,29 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tracing::error;
 
-/// POST /v1/logs — Ingest an array of log entries.
-pub async fn ingest_logs(
-    State(state): State<Arc<ApiState>>,
-    Json(entries): Json<Vec<LogEntry>>,
-) -> impl IntoResponse {
+/// Insert a batch of fluxx-native `LogEntry` rows. Returns the count
+/// actually inserted (errors per row are logged but don't fail the batch).
+/// Exposed as `pub` so the unified `/v1/logs` dispatcher in `ingest.rs`
+/// can reuse the same write path.
+pub async fn insert_log_entries(state: &Arc<ApiState>, entries: Vec<LogEntry>) -> usize {
     let count = entries.len();
     for entry in entries {
         if let Err(e) = state.log_store.insert(entry).await {
             error!("Failed to insert log entry: {}", e);
         }
     }
+    count
+}
+
+/// POST /v1/logs — Ingest an array of log entries (fluxx-native shape).
+/// Kept as a separate handler for the dedicated `/v1/logs/raw` route;
+/// the canonical `/v1/logs` route uses the content-negotiating
+/// dispatcher in `ingest.rs` so OTLP and native payloads share one URL.
+pub async fn ingest_logs(
+    State(state): State<Arc<ApiState>>,
+    Json(entries): Json<Vec<LogEntry>>,
+) -> impl IntoResponse {
+    let count = insert_log_entries(&state, entries).await;
     StandardResponse::ok(
         serde_json::json!({ "ingested": count }),
         "Log entries ingested successfully.",

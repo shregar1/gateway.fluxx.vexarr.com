@@ -6,7 +6,7 @@
 //!
 //! Auth: gated by the global bearer-token middleware. CI typically
 //! posts these via `fluxx sourcemaps upload`, which carries the
-//! token from `FLUXX_ADMIN_TOKEN`.
+//! token from `FLUXX_API_KEY`.
 
 use crate::{ApiState, StandardResponse};
 use axum::{

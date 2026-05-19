@@ -1,6 +1,14 @@
 # ── Secrets / env ─────────────────────────────────────────────────────────────
+# Per convention: anything matching `.env*` is ignored EXCEPT the two
+# committed files below:
+#   .env       — build-time (AUTH_URL etc.); read by cargo at compile time
+#   .env.user  — runtime documentation (FLUXX_API_KEY etc.); never loaded
+#                automatically, operators copy values into their own
+#                deployment env. Pure docs — contains no real secrets.
 .env
 .env.*
+!.env
+!.env.user
 !.env.example
 !.env.sample
 

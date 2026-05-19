@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use anyhow::{Result, Context};
-use std::env;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -225,18 +224,11 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let run_mode = env::var("RUN_MODE").unwrap_or_else(|_| "development".into());
-
         let s = config::Config::builder()
-            // Start off by merging in the "default" configuration file
+            // Start with `config/default.toml` if present — it's optional.
+            // Operators who want to tune host/port/log levels drop values
+            // there; everyone else gets the `Default` impl below.
             .add_source(config::File::with_name("config/default").required(false))
-            // Add in the current environment file
-            // Default to 'development' env
-            // Note that this file is _optional_
-            .add_source(
-                config::File::with_name(&format!("config/{}", run_mode))
-                    .required(false),
-            )
             // Settings from environment vars, prefix `APP_`. Nested
             // keys use `__` so `APP_SERVER__PORT=7007` sets
             // `server.port`. `prefix_separator` makes the strip explicit

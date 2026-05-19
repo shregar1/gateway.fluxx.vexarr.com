@@ -13,6 +13,7 @@
 
 pub mod ai_rca;
 pub mod annotations;
+pub mod auth;
 pub mod changes;
 pub mod ci;
 pub mod cluster;
@@ -23,6 +24,7 @@ pub mod dashboard;
 pub mod dbm;
 pub mod errors;
 pub mod incidents;
+pub mod ingest;
 pub mod logs;
 pub mod metrics;
 pub mod nl_dashboard;

@@ -168,7 +168,7 @@ fn resolve_base_url(flag: Option<&str>) -> String {
 
 async fn fetch_raw(http: &reqwest::Client, url: &str) -> anyhow::Result<String> {
     let mut req = http.get(url);
-    if let Ok(token) = std::env::var("FLUXX_ADMIN_TOKEN") {
+    if let Ok(token) = std::env::var("FLUXX_API_KEY") {
         if !token.is_empty() {
             req = req.bearer_auth(token);
         }
@@ -177,8 +177,8 @@ async fn fetch_raw(http: &reqwest::Client, url: &str) -> anyhow::Result<String> 
         .map_err(|e| anyhow::anyhow!("Failed to reach agent at {}: {}", url, e))?;
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         anyhow::bail!(
-            "Agent returned 401 Unauthorized. Set FLUXX_ADMIN_TOKEN to \
-             the token printed by `fluxx start` (or stored in \
+            "Agent returned 401 Unauthorized. Set FLUXX_API_KEY to the \
+             token printed by `fluxx start` (or stored in \
              /var/lib/fluxx/admin.token.sha256's matching plaintext)."
         );
     }

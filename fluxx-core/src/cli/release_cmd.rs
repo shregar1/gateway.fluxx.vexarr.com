@@ -25,7 +25,7 @@ pub enum ReleaseCmd {
     /// Declare a release. Idempotent on (project, version).
     Declare(DeclareArgs),
     /// Upload JS sourcemaps to the local agent so JS frames get
-    /// symbolicated on ingest. Auth via FLUXX_ADMIN_TOKEN.
+    /// symbolicated on ingest. Auth via FLUXX_API_KEY.
     Sourcemaps(UploadSourcemapsArgs),
 }
 
@@ -118,7 +118,9 @@ async fn upload_sourcemaps(args: UploadSourcemapsArgs) -> anyhow::Result<()> {
     } else {
         "http://127.0.0.1:7007".to_string()
     };
-    let token = std::env::var("FLUXX_ADMIN_TOKEN").ok();
+    let token = std::env::var("FLUXX_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -159,7 +161,7 @@ async fn upload_sourcemaps(args: UploadSourcemapsArgs) -> anyhow::Result<()> {
         let resp = req.send().await
             .map_err(|e| anyhow::anyhow!("Failed to reach agent at {}: {}", base, e))?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            anyhow::bail!("Agent returned 401. Set FLUXX_ADMIN_TOKEN to the agent's admin token.");
+            anyhow::bail!("Agent returned 401. Set FLUXX_API_KEY to this agent's configured key.");
         }
         if resp.status().is_success() {
             println!("✔ {}  ←  {}", bundle_url, path);

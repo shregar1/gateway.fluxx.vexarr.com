@@ -208,11 +208,32 @@ where
     // URL and an API key — that combination means there's nowhere for
     // the license check to even resolve to, so insisting on it would
     // just block startup with no upside.
+    // Skip the legacy api.fluxx.dev license check when any of these is true:
+    //   - FLUXX_SELF_HOSTED is explicitly set
+    //   - The binary was built with a non-empty AUTH_URL baked in (the
+    //     auth server is the trust anchor; dashboard sign-in does the
+    //     actual validation against it). AUTH_URL is required at build
+    //     time — there is no default — so any compiled binary has *some*
+    //     value here; "auth-backed" means that value is non-empty.
+    //   - Neither FLUXX_API_URL nor FLUXX_API_KEY is set (no cloud to call
+    //     in the first place — dev / fully-disconnected)
+    // `option_env!("AUTH_URL")` is captured at compile time but
+    // string-matching in a const context isn't yet stable, so compute
+    // the bake-state at runtime (still reading the same compile-time
+    // value — no runtime env consultation). Non-empty == live; empty
+    // (`AUTH_URL=`) == passthrough dev mode.
+    let auth_baked = option_env!("AUTH_URL")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false); // unreachable: AUTH_URL is required at build time
     let self_hosted = std::env::var("FLUXX_SELF_HOSTED")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
         .unwrap_or(false)
-        || (std::env::var("FLUXX_API_URL").is_err()
-            && std::env::var("FLUXX_API_KEY").is_err());
+        || auth_baked
+        // Self-hosted-by-default: if the operator never told us where
+        // the legacy cloud API lives, we don't try to reach it. The
+        // user only sets FLUXX_API_URL when they explicitly want the
+        // old `api.fluxx.dev`-style subscription check.
+        || std::env::var("FLUXX_API_URL").is_err();
 
     if requires_license && !self_hosted {
         match license::validate_subscription().await {
