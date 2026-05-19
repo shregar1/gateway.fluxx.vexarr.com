@@ -33,7 +33,7 @@ async fn auth_middleware(
     headers: HeaderMap,
     mut request: axum::extract::Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Response {
     // URL-based auth: path-prefix `/k/<KEY>/...` is rewritten to its
     // canonical path here, with the extracted key handed downstream as
     // the token. Clients that cannot set headers (embedded devices,
@@ -43,7 +43,7 @@ async fn auth_middleware(
 
     let path = request.uri().path();
     if is_public_path(path) {
-        return Ok(next.run(request).await);
+        return next.run(request).await;
     }
     let ingest_optional = is_ingest_path(path)
         && std::env::var("FLUXX_REQUIRE_INGEST_AUTH").is_err();
@@ -57,22 +57,174 @@ async fn auth_middleware(
 
     if let Some(t) = &token {
         if fluxx_core::security::bootstrap_token::verify_token(t) {
-            return Ok(next.run(request).await);
+            return next.run(request).await;
         }
         // Token was provided but wrong — always fail closed, even on
         // ingest paths. Submitting a *bad* key is intent to authenticate;
         // we shouldn't silently let it through.
         error!(path = %path, "Unauthorized API access attempt (bad token)");
-        return Err(StatusCode::UNAUTHORIZED);
+        return unauthorized_envelope(
+            "Invalid API key.",
+            "INVALID_API_KEY",
+        );
     }
 
     // No token. Anonymous ingest is allowed unless the operator opted in.
     if ingest_optional {
-        return Ok(next.run(request).await);
+        return next.run(request).await;
     }
 
     error!(path = %path, "Unauthorized API access attempt");
-    Err(StatusCode::UNAUTHORIZED)
+    unauthorized_envelope(
+        "Missing or invalid API key. Provide one via Authorization: Bearer, \
+         Authorization: Basic (userinfo URL), X-API-Key, or /k/<KEY>/ path-prefix.",
+        "UNAUTHORIZED",
+    )
+}
+
+/// Build a 401 response carrying the standard envelope body. Used by
+/// `auth_middleware` so every rejected request still gets a
+/// machine-readable `responseKey` / `responseMessage` instead of an
+/// empty body. The HTTP status is 401 (not 200) because middleware-level
+/// rejection is a transport-layer event — proxies, browsers, and CDNs
+/// rely on the status code, while the body keeps the family envelope
+/// shape so SDKs parse it uniformly.
+fn unauthorized_envelope(message: &str, key: &str) -> Response {
+    let envelope = crate::StandardResponse::error(
+        serde_json::Value::Null,
+        message,
+        key,
+        Vec::new(),
+    );
+    let mut resp = envelope.into_response();
+    *resp.status_mut() = StatusCode::UNAUTHORIZED;
+    resp
+}
+
+/// Catch-all envelope wrapper.
+///
+/// Axum's built-in extractor rejections (bad JSON body, missing fields,
+/// content-length too large, malformed bearer, etc.) return a default
+/// `text/plain` body with a non-2xx status. Same with handlers that
+/// bubble up a raw `Result<_, StatusCode>` or a tuple `(StatusCode, _)`.
+/// Without this layer, those error paths would break the
+/// "every API response is a `StandardResponse` JSON envelope" guarantee.
+///
+/// Implementation: run the inner stack, inspect the outgoing response,
+/// and if status >= 400 AND `Content-Type` is not `application/json`,
+/// wrap the body text into the standard envelope. Successful (`2xx`,
+/// `3xx`) responses and already-JSON 4xx/5xx responses pass through
+/// unchanged so we don't double-wrap handler-generated envelopes.
+///
+/// `is_protected_response_kind` keeps non-JSON intentional bodies
+/// (the Prometheus `/metrics` text scrape, dashboard HTML, sourcemap
+/// downloads, WebSocket upgrades, file downloads) out of the rewrite.
+async fn envelope_shaping_middleware(
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path().to_string();
+    let response = next.run(request).await;
+    let status = response.status();
+
+    // Happy path and intentional non-JSON bodies pass through.
+    if status.is_success() || status.is_redirection() {
+        return response;
+    }
+    if is_protected_response_kind(&path) {
+        return response;
+    }
+    // Already JSON? Trust the handler — don't double-wrap.
+    if response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.starts_with("application/json"))
+        .unwrap_or(false)
+    {
+        return response;
+    }
+
+    // Read whatever Axum/middleware produced as plain text and wrap it.
+    let (parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, 64 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return parts.status.into_response(),
+    };
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let key = status_to_response_key(parts.status);
+    let message = if text.trim().is_empty() {
+        parts.status.canonical_reason().unwrap_or("error").to_string()
+    } else {
+        text
+    };
+    let envelope = crate::StandardResponse::error(
+        serde_json::Value::Null,
+        &message,
+        &key,
+        Vec::new(),
+    );
+    let mut resp = envelope.into_response();
+    *resp.status_mut() = parts.status;
+    resp
+}
+
+/// Fallback handler — fires when no route matches. Sends the envelope
+/// with `responseKey = NOT_FOUND` instead of axum's default 404.
+async fn envelope_404(request: axum::extract::Request) -> Response {
+    let path = request.uri().path().to_string();
+    let envelope = crate::StandardResponse::error(
+        serde_json::Value::Null,
+        &format!("No route matches {}", path),
+        "NOT_FOUND",
+        Vec::new(),
+    );
+    let mut resp = envelope.into_response();
+    *resp.status_mut() = StatusCode::NOT_FOUND;
+    resp
+}
+
+/// Paths that legitimately return non-JSON bodies and must not be
+/// rewritten by the envelope-shaping middleware. The Prometheus scrape
+/// endpoint returns text/plain by protocol, the dashboard serves
+/// HTML/JS/CSS, sourcemaps and assets are binary, and the install
+/// endpoints stream shell scripts.
+fn is_protected_response_kind(path: &str) -> bool {
+    path == "/metrics"
+        || path == "/"
+        || path == "/index.html"
+        || path.starts_with("/assets/")
+        || path.starts_with("/install/")
+        || path == "/favicon.ico"
+        || path == "/favicon-light.svg"
+        || path == "/favicon-dark.svg"
+        || path == "/manifest.webmanifest"
+        || path == "/robots.txt"
+        || path == "/v1/logs/stream"
+        || path == "/v1/stream"
+}
+
+/// Map an HTTP status code to a stable, machine-readable response key.
+/// Used by the envelope-shaping middleware when it has to invent a
+/// key for a wrapped extractor rejection.
+fn status_to_response_key(status: StatusCode) -> String {
+    match status {
+        StatusCode::BAD_REQUEST => "INVALID_BODY".into(),
+        StatusCode::UNAUTHORIZED => "UNAUTHORIZED".into(),
+        StatusCode::FORBIDDEN => "FORBIDDEN".into(),
+        StatusCode::NOT_FOUND => "NOT_FOUND".into(),
+        StatusCode::METHOD_NOT_ALLOWED => "METHOD_NOT_ALLOWED".into(),
+        StatusCode::CONFLICT => "CONFLICT".into(),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "UNSUPPORTED_MEDIA_TYPE".into(),
+        StatusCode::PAYLOAD_TOO_LARGE => "PAYLOAD_TOO_LARGE".into(),
+        StatusCode::TOO_MANY_REQUESTS => "RATE_LIMITED".into(),
+        StatusCode::UNPROCESSABLE_ENTITY => "VALIDATION_ERROR".into(),
+        StatusCode::INTERNAL_SERVER_ERROR => "INTERNAL_ERROR".into(),
+        StatusCode::BAD_GATEWAY => "UPSTREAM_ERROR".into(),
+        StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE".into(),
+        StatusCode::GATEWAY_TIMEOUT => "TIMEOUT".into(),
+        other => format!("HTTP_{}", other.as_u16()),
+    }
 }
 
 /// If the URL starts with `/k/<KEY>/<rest>`, strip the prefix in place
@@ -482,7 +634,13 @@ impl ApiServer {
             .route("/v1/otlp/logs", post(crate::otlp_http_handlers::ingest_logs))
             .layer(middleware::from_fn(security_headers_middleware))
             .layer(middleware::from_fn(auth_middleware))
+            // Envelope-shaping layer — wraps any non-envelope error
+            // (axum Json parse failures, missing extractors, 404s on
+            // /v1/*) into a `StandardResponse` JSON body so SDKs and
+            // dashboards always see the same shape.
+            .layer(middleware::from_fn(envelope_shaping_middleware))
             .layer(cors)
+            .fallback(envelope_404)
             .with_state(self.state.clone());
 
         info!("API: Binding Fluxx layer to {} (auth required if configured)", self.addr);
@@ -729,6 +887,96 @@ mod url_auth_tests {
     fn no_auth_header_returns_none() {
         let h = HeaderMap::new();
         assert!(extract_token(&h).is_none());
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    //! Pin the envelope shape on every error/non-handler path. The
+    //! StandardResponse unit tests cover the happy path; these tests
+    //! cover the middleware/fallback rewrites.
+
+    use super::*;
+
+    fn parse_envelope(body: &[u8]) -> serde_json::Value {
+        serde_json::from_slice(body).expect("body should be JSON")
+    }
+
+    fn assert_is_envelope(v: &serde_json::Value) {
+        // Required camelCase keys
+        for k in [
+            "transactionUrn", "status", "responseMessage", "responseKey",
+            "errors", "timestamp", "metadata", "data",
+        ] {
+            assert!(v.get(k).is_some(), "envelope missing '{}': {}", k, v);
+        }
+        // The one snake_case key, per the family spec.
+        assert!(v.get("reference_urn").is_some(), "envelope missing 'reference_urn': {}", v);
+        assert!(v.get("referenceUrn").is_none(), "reference_urn must not be camelCased");
+        // errors is a list (of dicts in the wild) — never bare strings.
+        assert!(v["errors"].is_array(), "errors must be an array");
+    }
+
+    #[tokio::test]
+    async fn unauthorized_middleware_returns_envelope() {
+        let resp = unauthorized_envelope("nope", "INVALID_API_KEY");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v = parse_envelope(&bytes);
+        assert_is_envelope(&v);
+        assert_eq!(v["status"], "FAILED");
+        assert_eq!(v["responseKey"], "INVALID_API_KEY");
+        assert_eq!(v["responseMessage"], "nope");
+    }
+
+    #[tokio::test]
+    async fn fallback_returns_envelope_404() {
+        let req = axum::http::Request::builder()
+            .uri("/v1/does-not-exist")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = envelope_404(req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v = parse_envelope(&bytes);
+        assert_is_envelope(&v);
+        assert_eq!(v["responseKey"], "NOT_FOUND");
+        assert!(v["responseMessage"].as_str().unwrap().contains("/v1/does-not-exist"));
+    }
+
+    #[test]
+    fn status_keys_cover_common_4xx_5xx() {
+        // Smoke that we map the codes we care about (extractor rejection
+        // status codes axum emits). New rejections that aren't in the
+        // table fall through to HTTP_<code> rather than crashing.
+        assert_eq!(status_to_response_key(StatusCode::BAD_REQUEST), "INVALID_BODY");
+        assert_eq!(status_to_response_key(StatusCode::UNAUTHORIZED), "UNAUTHORIZED");
+        assert_eq!(status_to_response_key(StatusCode::NOT_FOUND), "NOT_FOUND");
+        assert_eq!(status_to_response_key(StatusCode::METHOD_NOT_ALLOWED), "METHOD_NOT_ALLOWED");
+        assert_eq!(status_to_response_key(StatusCode::PAYLOAD_TOO_LARGE), "PAYLOAD_TOO_LARGE");
+        assert_eq!(status_to_response_key(StatusCode::UNPROCESSABLE_ENTITY), "VALIDATION_ERROR");
+        assert_eq!(status_to_response_key(StatusCode::INTERNAL_SERVER_ERROR), "INTERNAL_ERROR");
+        // Fallback for codes we didn't enumerate.
+        assert_eq!(status_to_response_key(StatusCode::IM_A_TEAPOT), "HTTP_418");
+    }
+
+    #[test]
+    fn protected_paths_skip_envelope_rewrite() {
+        // Anything text/binary by protocol — never JSON-wrap these.
+        assert!(is_protected_response_kind("/metrics"));
+        assert!(is_protected_response_kind("/"));
+        assert!(is_protected_response_kind("/assets/main.abc.js"));
+        assert!(is_protected_response_kind("/install/install_agent.sh"));
+        assert!(is_protected_response_kind("/v1/stream"));
+        assert!(is_protected_response_kind("/v1/logs/stream"));
+        // Regular API paths get the rewrite.
+        assert!(!is_protected_response_kind("/v1/traces"));
+        assert!(!is_protected_response_kind("/v1/logs"));
+        assert!(!is_protected_response_kind("/v1/auth/verify"));
     }
 }
 
