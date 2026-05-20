@@ -18,6 +18,51 @@ pub struct Config {
     pub metric_alerts: MetricAlertConfig,
     #[serde(default)]
     pub clickhouse_error_events: ClickHouseErrorEventsConfig,
+    #[serde(default)]
+    pub duckdb: DuckDbConfig,
+}
+
+/// Single embedded DuckDB persistent backend for events, logs, and
+/// metrics. Off by default — the in-memory path stays the
+/// laptop-friendly default.
+///
+/// Two modes when enabled:
+/// - `write-through` (default): in-memory stays the hot read/write
+///   path; every insert is also async-queued into DuckDB for
+///   durability. Queries hit in-memory first and fall through to
+///   DuckDB on miss. Recommended for self-hosted production.
+/// - `replace`: DuckDB is the only backend. Writes and reads both
+///   go through it directly. Simpler, but every query pays the
+///   columnar-scan cost even for recent data.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DuckDbConfig {
+    pub enabled: bool,
+    /// Directory holding the three DuckDB files
+    /// (`events.duckdb`, `logs.duckdb`, `metrics.duckdb`).
+    /// Pass `:memory:` for ephemeral.
+    pub dir: String,
+    /// "write-through" or "replace". Default: "write-through".
+    #[serde(default = "default_duckdb_mode")]
+    pub mode: String,
+    /// Bounded async channel size for write-through ingest to
+    /// DuckDB. If saturated, new entries are dropped from the
+    /// DuckDB sink (in-memory still has them) with a warn log.
+    #[serde(default = "default_duckdb_channel")]
+    pub channel_capacity: usize,
+}
+
+fn default_duckdb_mode() -> String { "write-through".to_string() }
+fn default_duckdb_channel() -> usize { 100_000 }
+
+impl Default for DuckDbConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: "/var/lib/fluxx/duckdb".to_string(),
+            mode: default_duckdb_mode(),
+            channel_capacity: default_duckdb_channel(),
+        }
+    }
 }
 
 /// Configuration for persisting error events to ClickHouse.
@@ -218,6 +263,7 @@ impl Default for Config {
             statsd: StatsdConfig::default(),
             metric_alerts: MetricAlertConfig::default(),
             clickhouse_error_events: ClickHouseErrorEventsConfig::default(),
+            duckdb: DuckDbConfig::default(),
         }
     }
 }
@@ -328,6 +374,7 @@ mod tests {
             statsd: StatsdConfig::default(),
             metric_alerts: MetricAlertConfig::default(),
             clickhouse_error_events: ClickHouseErrorEventsConfig::default(),
+            duckdb: DuckDbConfig::default(),
         };
         assert_eq!(config.agent_name, "custom-agent");
         assert_eq!(config.server.port, 9090);

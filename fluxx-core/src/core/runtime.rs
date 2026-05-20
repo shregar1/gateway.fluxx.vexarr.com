@@ -88,14 +88,89 @@ impl AgentService {
         info!("Runtime: Configuring Fluxx agent '{}'", config.agent_name);
 
         let session_store = Arc::new(InMemorySessionStore::new(600));
-        let event_store: Arc<dyn crate::storage::EventStore> = Arc::new(InMemoryEventStore::with_max_entries(config.logs.max_entries));
         let session_manager = Arc::new(SessionManager::new(session_store.clone()));
 
-        // Initialize metric store
-        let metric_store: Arc<dyn crate::storage::MetricStore> = Arc::new(InMemoryMetricStore::with_max_entries(config.logs.max_entries));
+        // DuckDB unified backend: when enabled, all three signal
+        // stores (events, logs, metrics) persist into per-signal
+        // DuckDB files under config.duckdb.dir. Off by default — the
+        // default path remains the bounded in-memory stores with
+        // eviction.
+        //
+        // Mode: "write-through" (default) keeps in-memory as the hot
+        // read/write path with async DuckDB durability underneath;
+        // "replace" makes DuckDB the only backend.
+        let (event_store, metric_store, log_store): (
+            Arc<dyn crate::storage::EventStore>,
+            Arc<dyn crate::storage::MetricStore>,
+            Arc<dyn crate::storage::LogStore>,
+        ) = if config.duckdb.enabled {
+            let dir = &config.duckdb.dir;
+            let ev_path = if dir == ":memory:" { ":memory:".into() } else { format!("{dir}/events.duckdb") };
+            let lg_path = if dir == ":memory:" { ":memory:".into() } else { format!("{dir}/logs.duckdb") };
+            let mt_path = if dir == ":memory:" { ":memory:".into() } else { format!("{dir}/metrics.duckdb") };
 
-        // Initialize log store based on configured backend
-        let log_store: Arc<dyn crate::storage::LogStore> = match config.logs.backend.as_str() {
+            let ev_db = crate::storage::DuckDbEventStore::open(&ev_path);
+            let mt_db = crate::storage::DuckDbMetricStore::open(&mt_path);
+            let lg_db = crate::storage::DuckDbLogStore::open(&lg_path);
+
+            match (ev_db, mt_db, lg_db) {
+                (Ok(ev_db), Ok(mt_db), Ok(lg_db)) => {
+                    let ev_db = Arc::new(ev_db);
+                    let mt_db = Arc::new(mt_db);
+                    let lg_db = Arc::new(lg_db);
+
+                    let is_replace = config.duckdb.mode.eq_ignore_ascii_case("replace");
+                    if is_replace {
+                        info!("Runtime: persistent backend = duckdb/replace (dir={})", dir);
+                        (
+                            ev_db as Arc<dyn crate::storage::EventStore>,
+                            mt_db as Arc<dyn crate::storage::MetricStore>,
+                            lg_db as Arc<dyn crate::storage::LogStore>,
+                        )
+                    } else {
+                        info!("Runtime: persistent backend = duckdb/write-through (dir={}, channel={})",
+                              dir, config.duckdb.channel_capacity);
+                        let hot_ev: Arc<dyn crate::storage::EventStore> =
+                            Arc::new(InMemoryEventStore::with_max_entries(config.logs.max_entries));
+                        let hot_mt: Arc<dyn crate::storage::MetricStore> =
+                            Arc::new(InMemoryMetricStore::with_max_entries(config.logs.max_entries));
+                        let hot_lg: Arc<dyn crate::storage::LogStore> =
+                            Arc::new(InMemoryLogStore::new(config.logs.max_entries));
+                        (
+                            Arc::new(crate::storage::WriteThroughEventStore::new(
+                                hot_ev,
+                                ev_db as Arc<dyn crate::storage::EventStore>,
+                                config.duckdb.channel_capacity,
+                            )),
+                            Arc::new(crate::storage::WriteThroughMetricStore::new(
+                                hot_mt,
+                                mt_db as Arc<dyn crate::storage::MetricStore>,
+                                config.duckdb.channel_capacity,
+                            )),
+                            Arc::new(crate::storage::WriteThroughLogStore::new(
+                                hot_lg,
+                                lg_db as Arc<dyn crate::storage::LogStore>,
+                                config.duckdb.channel_capacity,
+                            )),
+                        )
+                    }
+                }
+                _ => {
+                    error!("Runtime: DuckDB backend failed, falling back to memory");
+                    (
+                        Arc::new(InMemoryEventStore::with_max_entries(config.logs.max_entries)),
+                        Arc::new(InMemoryMetricStore::with_max_entries(config.logs.max_entries)),
+                        Arc::new(InMemoryLogStore::new(config.logs.max_entries)),
+                    )
+                }
+            }
+        } else {
+            // In-memory defaults
+            let ev: Arc<dyn crate::storage::EventStore> =
+                Arc::new(InMemoryEventStore::with_max_entries(config.logs.max_entries));
+            let mt: Arc<dyn crate::storage::MetricStore> =
+                Arc::new(InMemoryMetricStore::with_max_entries(config.logs.max_entries));
+            let lg: Arc<dyn crate::storage::LogStore> = match config.logs.backend.as_str() {
             "file" => {
                 let file_config = crate::storage::file_log::FileLogConfig {
                     directory: config.logs.file.directory.clone(),
@@ -135,6 +210,8 @@ impl AgentService {
                 info!("Runtime: Log store backend = memory (max_entries={})", config.logs.max_entries);
                 Arc::new(InMemoryLogStore::new(config.logs.max_entries))
             }
+            };
+            (ev, mt, lg)
         };
         let (metric_tx, _) = broadcast::channel::<Arc<Metric>>(1024);
         let (log_tx, _) = broadcast::channel::<Arc<LogEntry>>(1024);

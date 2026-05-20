@@ -102,6 +102,11 @@ snap = "1"
 # gzip — used by the OTLP HTTP receiver to ungzip incoming payloads
 # from SDKs that ship with `compression: 'gzip'` enabled.
 flate2 = "1"
+# DuckDB embedded — the self-hosted-friendly persistent backend.
+# `bundled` builds DuckDB from source so `./fluxx start` works with
+# no system libduckdb install. Adds ~5 min to a cold build but
+# matches the "one binary, no ops" positioning.
+duckdb = { version = "1.0", features = ["bundled"] }
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
