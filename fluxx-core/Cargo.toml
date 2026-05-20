@@ -115,7 +115,7 @@ tempfile = "3"
 # module is gated behind `#[ignore]` so the dep is only fetched when
 # someone actually runs the integration suite — no impact on default
 # `cargo test` runs (and no Docker requirement for them).
-testcontainers = "0.23"
+testcontainers = { version = "0.23", features = ["http_wait"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aya = "0.12"

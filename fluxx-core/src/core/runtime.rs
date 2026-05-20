@@ -112,7 +112,66 @@ impl AgentService {
             Arc<dyn crate::storage::EventStore>,
             Arc<dyn crate::storage::MetricStore>,
             Arc<dyn crate::storage::LogStore>,
-        ) = if config.duckdb.enabled {
+        ) = if config.clickhouse.enabled {
+            // ClickHouse takes precedence over DuckDB. Build one
+            // shared HTTP client per backend so connection pooling
+            // and basic-auth state aren't duplicated three ways.
+            let chcfg = &config.clickhouse;
+            let client_res = crate::storage::clickhouse_client::ClickHouseClient::new(
+                &chcfg.host,
+                chcfg.port,
+                &chcfg.database,
+                chcfg.username.clone(),
+                chcfg.password.clone(),
+                std::time::Duration::from_secs(chcfg.http_timeout_secs),
+            );
+            match client_res {
+                Ok(client) => {
+                    let client = Arc::new(client);
+                    let flush_interval = std::time::Duration::from_secs(chcfg.flush_interval_secs);
+                    let create_db = format!("CREATE DATABASE IF NOT EXISTS {}", chcfg.database);
+                    if let Err(e) = client.execute(&create_db).await {
+                        error!("Runtime: ClickHouse database create failed: {e} — falling back to memory");
+                    }
+                    let lg = crate::storage::ClickHouseLogStore::new(
+                        client.clone(), chcfg.queue_capacity, chcfg.flush_batch_size, flush_interval,
+                    ).await;
+                    let ev = crate::storage::ClickHouseEventStore::new(
+                        client.clone(), chcfg.queue_capacity, chcfg.flush_batch_size, flush_interval,
+                    ).await;
+                    let mt = crate::storage::ClickHouseMetricStore::new(
+                        client.clone(), chcfg.queue_capacity, chcfg.flush_batch_size, flush_interval,
+                    ).await;
+                    match (lg, ev, mt) {
+                        (Ok(lg), Ok(ev), Ok(mt)) => {
+                            info!("Runtime: persistent backend = clickhouse ({}:{}/{}, batch={}, flush={}s)",
+                                  chcfg.host, chcfg.port, chcfg.database, chcfg.flush_batch_size, chcfg.flush_interval_secs);
+                            (
+                                Arc::new(ev) as Arc<dyn crate::storage::EventStore>,
+                                Arc::new(mt) as Arc<dyn crate::storage::MetricStore>,
+                                Arc::new(lg) as Arc<dyn crate::storage::LogStore>,
+                            )
+                        }
+                        _ => {
+                            error!("Runtime: ClickHouse store init failed, falling back to memory");
+                            (
+                                Arc::new(InMemoryEventStore::with_max_entries(config.logs.max_entries)),
+                                Arc::new(InMemoryMetricStore::with_max_entries(config.logs.max_entries)),
+                                Arc::new(InMemoryLogStore::new(config.logs.max_entries)),
+                            )
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Runtime: ClickHouse client build failed: {e} — falling back to memory");
+                    (
+                        Arc::new(InMemoryEventStore::with_max_entries(config.logs.max_entries)),
+                        Arc::new(InMemoryMetricStore::with_max_entries(config.logs.max_entries)),
+                        Arc::new(InMemoryLogStore::new(config.logs.max_entries)),
+                    )
+                }
+            }
+        } else if config.duckdb.enabled {
             let dir = &config.duckdb.dir;
             let ev_path = if dir == ":memory:" { ":memory:".into() } else { format!("{dir}/events.duckdb") };
             let lg_path = if dir == ":memory:" { ":memory:".into() } else { format!("{dir}/logs.duckdb") };
