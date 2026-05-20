@@ -9,16 +9,22 @@ use tokio::sync::{RwLock, broadcast};
 /// In-memory log store using BTreeMap for efficient time-range queries.
 #[derive(Debug)]
 pub struct InMemoryLogStore {
-    data: RwLock<BTreeMap<u64, Vec<LogEntry>>>,
+    data: RwLock<LogShard>,
     log_bus: broadcast::Sender<Arc<LogEntry>>,
     max_entries: usize,
+}
+
+#[derive(Debug, Default)]
+struct LogShard {
+    map: BTreeMap<u64, Vec<LogEntry>>,
+    total: usize,
 }
 
 impl InMemoryLogStore {
     pub fn new(max_entries: usize) -> Self {
         let (tx, _) = broadcast::channel(4096);
         Self {
-            data: RwLock::new(BTreeMap::new()),
+            data: RwLock::new(LogShard::default()),
             log_bus: tx,
             max_entries,
         }
@@ -42,27 +48,14 @@ impl LogStore for InMemoryLogStore {
         let _ = self.log_bus.send(entry_arc);
 
         let mut data = self.data.write().await;
-        data.entry(entry.timestamp_us).or_default().push(entry);
+        let ts = entry.timestamp_us;
+        data.map.entry(ts).or_default().push(entry);
+        data.total += 1;
 
-        // Enforce max entries by evicting oldest
-        let total: usize = data.values().map(|v| v.len()).sum();
-        if total > self.max_entries {
-            let excess = total - self.max_entries;
-            let mut removed = 0;
-            let keys_to_check: Vec<u64> = data.keys().copied().collect();
-            for key in keys_to_check {
-                if removed >= excess {
-                    break;
-                }
-                if let Some(entries) = data.get(&key) {
-                    let count = entries.len();
-                    if removed + count <= excess {
-                        data.remove(&key);
-                        removed += count;
-                    } else {
-                        break;
-                    }
-                }
+        while data.total > self.max_entries {
+            match data.map.pop_first() {
+                Some((_, entries)) => data.total -= entries.len(),
+                None => break,
             }
         }
 
@@ -79,7 +72,7 @@ impl LogStore for InMemoryLogStore {
 
         let mut skipped = 0;
 
-        for (_ts, entries) in data.range(from..=to).rev() {
+        for (_ts, entries) in data.map.range(from..=to).rev() {
             for entry in entries.iter().rev() {
                 // Filter by service
                 if let Some(ref svc) = params.service {
@@ -139,7 +132,7 @@ impl LogStore for InMemoryLogStore {
 
     async fn len(&self) -> Result<usize> {
         let data = self.data.read().await;
-        Ok(data.values().map(|v| v.len()).sum())
+        Ok(data.total)
     }
 }
 

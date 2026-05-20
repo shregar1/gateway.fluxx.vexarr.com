@@ -88,11 +88,11 @@ impl AgentService {
         info!("Runtime: Configuring Fluxx agent '{}'", config.agent_name);
 
         let session_store = Arc::new(InMemorySessionStore::new(600));
-        let event_store: Arc<dyn crate::storage::EventStore> = Arc::new(InMemoryEventStore::new());
+        let event_store: Arc<dyn crate::storage::EventStore> = Arc::new(InMemoryEventStore::with_max_entries(config.logs.max_entries));
         let session_manager = Arc::new(SessionManager::new(session_store.clone()));
 
         // Initialize metric store
-        let metric_store: Arc<dyn crate::storage::MetricStore> = Arc::new(InMemoryMetricStore::new());
+        let metric_store: Arc<dyn crate::storage::MetricStore> = Arc::new(InMemoryMetricStore::with_max_entries(config.logs.max_entries));
 
         // Initialize log store based on configured backend
         let log_store: Arc<dyn crate::storage::LogStore> = match config.logs.backend.as_str() {
