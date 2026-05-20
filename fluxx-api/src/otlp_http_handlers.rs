@@ -30,6 +30,12 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 /// Write a parsed OTLP trace request into the event store / bus.
 /// Returns the number of spans accepted.
 pub async fn write_otlp_traces(state: &Arc<ApiState>, request: ExportTraceServiceRequest) -> usize {
+    // Tee to the optional OTLP HTTP forwarder before consuming the
+    // request. Fire-and-forget — never blocks ingest.
+    if let Some(fwd) = state.otlp_forwarder.as_ref() {
+        fwd.forward_traces(request.clone());
+    }
+
     let events = convert::otlp_spans_to_events(&request.resource_spans);
     let count = events.len();
 
@@ -48,6 +54,10 @@ pub async fn write_otlp_traces(state: &Arc<ApiState>, request: ExportTraceServic
 /// Write a parsed OTLP metric request into the metric store / bus.
 /// Returns the number of metric data points accepted.
 pub async fn write_otlp_metrics(state: &Arc<ApiState>, request: ExportMetricsServiceRequest) -> usize {
+    if let Some(fwd) = state.otlp_forwarder.as_ref() {
+        fwd.forward_metrics(request.clone());
+    }
+
     let metrics = convert::otlp_metrics_to_metrics(&request.resource_metrics);
     let count = metrics.len();
 
@@ -66,6 +76,10 @@ pub async fn write_otlp_metrics(state: &Arc<ApiState>, request: ExportMetricsSer
 /// Write a parsed OTLP log request into the log store.
 /// Returns the number of log records accepted.
 pub async fn write_otlp_logs(state: &Arc<ApiState>, request: ExportLogsServiceRequest) -> usize {
+    if let Some(fwd) = state.otlp_forwarder.as_ref() {
+        fwd.forward_logs(request.clone());
+    }
+
     let entries = convert::otlp_logs_to_entries(&request.resource_logs);
     let count = entries.len();
 
