@@ -489,6 +489,18 @@ impl AgentService {
             info!("Runtime: Anomaly detector enabled (60s interval)");
         }
 
+        let otlp_forwarder = if config.otlp_forwarder.enabled {
+            let opts = crate::storage::OtlpForwarderOptions {
+                endpoint: config.otlp_forwarder.endpoint.clone(),
+                timeout_secs: config.otlp_forwarder.timeout_secs,
+                channel_capacity: config.otlp_forwarder.channel_capacity,
+                bearer_token: config.otlp_forwarder.bearer_token.clone(),
+            };
+            Some(crate::storage::OtlpForwarder::new(opts))
+        } else {
+            None
+        };
+
         self.config = Some(config);
 
         Ok(RuntimeContext {
@@ -502,6 +514,7 @@ impl AgentService {
             error_tracker,
             sourcemap_store,
             audit_log,
+            otlp_forwarder,
         })
     }
 
