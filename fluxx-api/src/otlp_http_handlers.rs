@@ -15,6 +15,7 @@
 
 use crate::{ApiState, StandardResponse};
 use fluxx_core::protocols::otlp::convert;
+use fluxx_core::sampling::SamplingDecision;
 use axum::{
     extract::State,
     response::IntoResponse,
@@ -28,55 +29,83 @@ use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequ
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 
 /// Write a parsed OTLP trace request into the event store / bus.
-/// Returns the number of spans accepted.
+/// Returns the number of spans accepted *after* sampling. Sampled-
+/// out spans are still broadcast on the bus so live-tail subscribers
+/// (which want full visibility) see them — only durable storage is
+/// gated by the sampler.
 pub async fn write_otlp_traces(state: &Arc<ApiState>, request: ExportTraceServiceRequest) -> usize {
     let events = convert::otlp_spans_to_events(&request.resource_spans);
-    let count = events.len();
+    let mut accepted = 0usize;
 
     for event in events {
-        let event_arc = Arc::new(event.clone());
-        let _ = state.event_bus.send(event_arc);
-        if let Err(e) = state.event_store.insert(event).await {
-            error!("OTLP HTTP trace store error: {}", e);
+        // Bus first — subscribers always see the full stream.
+        let _ = state.event_bus.send(Arc::new(event.clone()));
+        match state.sampler.decide_trace(&event) {
+            SamplingDecision::Keep => {
+                if let Err(e) = state.event_store.insert(event).await {
+                    error!("OTLP HTTP trace store error: {}", e);
+                } else {
+                    accepted += 1;
+                }
+            }
+            SamplingDecision::Drop => {}
         }
     }
 
-    info!("OTLP HTTP: Ingested {} spans", count);
-    count
+    info!("OTLP HTTP: Stored {} spans (after sampling)", accepted);
+    accepted
 }
 
 /// Write a parsed OTLP metric request into the metric store / bus.
-/// Returns the number of metric data points accepted.
+/// Returns the number of metric data points accepted *after*
+/// sampling. By default the sampler keeps every metric; opting into
+/// per-point metric sampling is rarely the right tool — see the
+/// `[sampling]` config block.
 pub async fn write_otlp_metrics(state: &Arc<ApiState>, request: ExportMetricsServiceRequest) -> usize {
     let metrics = convert::otlp_metrics_to_metrics(&request.resource_metrics);
-    let count = metrics.len();
+    let mut accepted = 0usize;
 
     for metric in metrics {
-        let metric_arc = Arc::new(metric.clone());
-        let _ = state.metric_bus.send(metric_arc);
-        if let Err(e) = state.metric_store.insert(metric).await {
-            error!("OTLP HTTP metric store error: {}", e);
+        let _ = state.metric_bus.send(Arc::new(metric.clone()));
+        match state.sampler.decide_metric(&metric) {
+            SamplingDecision::Keep => {
+                if let Err(e) = state.metric_store.insert(metric).await {
+                    error!("OTLP HTTP metric store error: {}", e);
+                } else {
+                    accepted += 1;
+                }
+            }
+            SamplingDecision::Drop => {}
         }
     }
 
-    info!("OTLP HTTP: Ingested {} metric data points", count);
-    count
+    info!("OTLP HTTP: Stored {} metric data points (after sampling)", accepted);
+    accepted
 }
 
 /// Write a parsed OTLP log request into the log store.
-/// Returns the number of log records accepted.
+/// Returns the number of log records accepted *after* sampling.
+/// Error-level entries are always kept (when
+/// `sampling.always_keep_errors = true`, the default).
 pub async fn write_otlp_logs(state: &Arc<ApiState>, request: ExportLogsServiceRequest) -> usize {
     let entries = convert::otlp_logs_to_entries(&request.resource_logs);
-    let count = entries.len();
+    let mut accepted = 0usize;
 
     for entry in entries {
-        if let Err(e) = state.log_store.insert(entry).await {
-            error!("OTLP HTTP log store error: {}", e);
+        match state.sampler.decide_log(&entry) {
+            SamplingDecision::Keep => {
+                if let Err(e) = state.log_store.insert(entry).await {
+                    error!("OTLP HTTP log store error: {}", e);
+                } else {
+                    accepted += 1;
+                }
+            }
+            SamplingDecision::Drop => {}
         }
     }
 
-    info!("OTLP HTTP: Ingested {} log records", count);
-    count
+    info!("OTLP HTTP: Stored {} log records (after sampling)", accepted);
+    accepted
 }
 
 /// POST /v1/traces and POST /v1/otlp/traces — OTLP HTTP/JSON traces.

@@ -20,6 +20,41 @@ pub struct Config {
     pub clickhouse_error_events: ClickHouseErrorEventsConfig,
     #[serde(default)]
     pub duckdb: DuckDbConfig,
+    #[serde(default)]
+    pub sampling: SamplingConfig,
+}
+
+/// Adaptive sampling at ingest — the single biggest cost lever.
+///
+/// Off by default (every entry kept). When `enabled = true`:
+/// - errors are always kept (logs >= Warn, traces with `error=true`
+///   / `exception.*` attr, or severity >= High)
+/// - traces slower than `slow_latency_us` are always kept
+/// - everything else is randomly dropped at `1 - default_keep_rate`
+/// - metrics pass through unless `sample_metrics = true`
+///
+/// Mirrors `fluxx_core::sampling::SamplerConfig` — kept as a
+/// config-layer struct so the serde derive lives next to the
+/// other config schemas.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SamplingConfig {
+    pub enabled: bool,
+    pub default_keep_rate: f64,
+    pub slow_latency_us: u64,
+    pub always_keep_errors: bool,
+    pub sample_metrics: bool,
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_keep_rate: 0.1,
+            slow_latency_us: 1_000_000,
+            always_keep_errors: true,
+            sample_metrics: false,
+        }
+    }
 }
 
 /// Single embedded DuckDB persistent backend for events, logs, and
@@ -264,6 +299,7 @@ impl Default for Config {
             metric_alerts: MetricAlertConfig::default(),
             clickhouse_error_events: ClickHouseErrorEventsConfig::default(),
             duckdb: DuckDbConfig::default(),
+            sampling: SamplingConfig::default(),
         }
     }
 }
@@ -375,6 +411,7 @@ mod tests {
             metric_alerts: MetricAlertConfig::default(),
             clickhouse_error_events: ClickHouseErrorEventsConfig::default(),
             duckdb: DuckDbConfig::default(),
+            sampling: SamplingConfig::default(),
         };
         assert_eq!(config.agent_name, "custom-agent");
         assert_eq!(config.server.port, 9090);
