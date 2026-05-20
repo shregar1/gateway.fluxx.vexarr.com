@@ -18,6 +18,7 @@ pub mod comparison;
 // fluxx-core itself free of any api dependency and breaks the cycle
 // that would otherwise form (api -> core -> api).
 pub mod replay;
+pub mod sampling;
 pub mod sessions;
 pub mod storage;
 pub mod transport;

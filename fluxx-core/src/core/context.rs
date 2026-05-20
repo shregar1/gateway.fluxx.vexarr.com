@@ -28,6 +28,7 @@ use crate::models::event::Event;
 use crate::models::log_entry::LogEntry;
 use crate::models::metric::Metric;
 use crate::security::audit::AuditLog;
+use crate::sampling::Sampler;
 use crate::sessions::SessionManager;
 use crate::storage::event_store::EventStore;
 use crate::storage::log_store::LogStore;
@@ -49,4 +50,8 @@ pub struct RuntimeContext {
     pub error_tracker: Arc<ErrorTracker>,
     pub sourcemap_store: Arc<SourcemapStore>,
     pub audit_log: Arc<AuditLog>,
+    /// Adaptive sampler — when `config.sampling.enabled = false`
+    /// every `decide_*` returns `Keep` and behavior is unchanged.
+    /// Hot-path cost is a single atomic increment per call.
+    pub sampler: Arc<Sampler>,
 }

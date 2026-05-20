@@ -489,6 +489,25 @@ impl AgentService {
             info!("Runtime: Anomaly detector enabled (60s interval)");
         }
 
+        let sampler = Arc::new(crate::sampling::Sampler::new(
+            crate::sampling::SamplerConfig {
+                enabled: config.sampling.enabled,
+                default_keep_rate: config.sampling.default_keep_rate,
+                slow_latency_us: config.sampling.slow_latency_us,
+                always_keep_errors: config.sampling.always_keep_errors,
+                sample_metrics: config.sampling.sample_metrics,
+            },
+        ));
+        if config.sampling.enabled {
+            info!(
+                "Runtime: adaptive sampling enabled (keep_rate={}, slow_threshold={}us, keep_errors={}, sample_metrics={})",
+                config.sampling.default_keep_rate,
+                config.sampling.slow_latency_us,
+                config.sampling.always_keep_errors,
+                config.sampling.sample_metrics,
+            );
+        }
+
         self.config = Some(config);
 
         Ok(RuntimeContext {
@@ -502,6 +521,7 @@ impl AgentService {
             error_tracker,
             sourcemap_store,
             audit_log,
+            sampler,
         })
     }
 
