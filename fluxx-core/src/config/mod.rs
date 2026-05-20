@@ -24,6 +24,47 @@ pub struct Config {
     pub otlp_forwarder: OtlpForwarderConfig,
     #[serde(default)]
     pub cold_archive: ColdArchiveConfig,
+    #[serde(default)]
+    pub clickhouse: ClickHouseSignalsConfig,
+}
+
+/// ClickHouse-backed persistent store for events, logs, and metrics.
+/// Off by default. When `enabled = true` ClickHouse takes precedence
+/// over DuckDB and the in-memory default — the three stores send
+/// their inserts to ClickHouse via batched `JSONEachRow` HTTP POSTs.
+///
+/// Field names mirror the existing `clickhouse_error_events` config
+/// so an operator who's already configured one can copy-paste the
+/// connection block.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ClickHouseSignalsConfig {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub flush_interval_secs: u64,
+    pub flush_batch_size: usize,
+    pub queue_capacity: usize,
+    pub http_timeout_secs: u64,
+}
+
+impl Default for ClickHouseSignalsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: "localhost".to_string(),
+            port: 8123,
+            database: "fluxx".to_string(),
+            username: None,
+            password: None,
+            flush_interval_secs: 1,
+            flush_batch_size: 1000,
+            queue_capacity: 100_000,
+            http_timeout_secs: 10,
+        }
+    }
 }
 
 /// Cold-tier archiver: periodically COPY DuckDB rows older than
@@ -341,6 +382,7 @@ impl Default for Config {
             duckdb: DuckDbConfig::default(),
             otlp_forwarder: OtlpForwarderConfig::default(),
             cold_archive: ColdArchiveConfig::default(),
+            clickhouse: ClickHouseSignalsConfig::default(),
         }
     }
 }
