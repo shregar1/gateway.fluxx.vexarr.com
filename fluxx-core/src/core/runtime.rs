@@ -99,6 +99,15 @@ impl AgentService {
         // Mode: "write-through" (default) keeps in-memory as the hot
         // read/write path with async DuckDB durability underneath;
         // "replace" makes DuckDB the only backend.
+        // Captured here so the cold-tier archiver can hold clones of
+        // the DuckDB stores below — see ColdArchiver::start at the
+        // end of prepare_runtime.
+        let mut duckdb_handles: Option<(
+            Arc<crate::storage::DuckDbLogStore>,
+            Arc<crate::storage::DuckDbEventStore>,
+            Arc<crate::storage::DuckDbMetricStore>,
+        )> = None;
+
         let (event_store, metric_store, log_store): (
             Arc<dyn crate::storage::EventStore>,
             Arc<dyn crate::storage::MetricStore>,
@@ -118,6 +127,7 @@ impl AgentService {
                     let ev_db = Arc::new(ev_db);
                     let mt_db = Arc::new(mt_db);
                     let lg_db = Arc::new(lg_db);
+                    duckdb_handles = Some((lg_db.clone(), ev_db.clone(), mt_db.clone()));
 
                     let is_replace = config.duckdb.mode.eq_ignore_ascii_case("replace");
                     if is_replace {
@@ -489,6 +499,47 @@ impl AgentService {
             info!("Runtime: Anomaly detector enabled (60s interval)");
         }
 
+        let otlp_forwarder = if config.otlp_forwarder.enabled {
+            let opts = crate::storage::OtlpForwarderOptions {
+                endpoint: config.otlp_forwarder.endpoint.clone(),
+                timeout_secs: config.otlp_forwarder.timeout_secs,
+                channel_capacity: config.otlp_forwarder.channel_capacity,
+                bearer_token: config.otlp_forwarder.bearer_token.clone(),
+            };
+            Some(crate::storage::OtlpForwarder::new(opts))
+        } else {
+            None
+        };
+
+        // Cold-tier archiver — gated on DuckDB being the active
+        // persistent backend. The handle is leaked into a static via
+        // `mem::forget` so the background task lives for the
+        // process lifetime; dropping it would shut down the sweep.
+        if config.cold_archive.enabled {
+            if let Some((lg, ev, mt)) = duckdb_handles.as_ref() {
+                let opts = crate::storage::ColdArchiverOptions {
+                    output_base: config.cold_archive.output_base.clone(),
+                    interval: std::time::Duration::from_secs(config.cold_archive.interval_secs),
+                    older_than_logs: std::time::Duration::from_secs(config.cold_archive.older_than_logs_secs),
+                    older_than_traces: std::time::Duration::from_secs(config.cold_archive.older_than_traces_secs),
+                    older_than_metrics: std::time::Duration::from_secs(config.cold_archive.older_than_metrics_secs),
+                    delete_after_archive: config.cold_archive.delete_after_archive,
+                };
+                let archiver = crate::storage::ColdArchiver::start(
+                    opts,
+                    lg.clone(),
+                    ev.clone(),
+                    mt.clone(),
+                );
+                // Lifetime: keep the archiver alive for the process.
+                // Dropping it sends a shutdown signal; we never want
+                // that for the gateway's lifetime.
+                std::mem::forget(archiver);
+            } else {
+                error!("Runtime: cold_archive.enabled = true but duckdb is not active — cold-tier disabled");
+            }
+        }
+
         self.config = Some(config);
 
         Ok(RuntimeContext {
@@ -502,6 +553,7 @@ impl AgentService {
             error_tracker,
             sourcemap_store,
             audit_log,
+            otlp_forwarder,
         })
     }
 

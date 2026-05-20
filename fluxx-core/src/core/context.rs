@@ -32,6 +32,7 @@ use crate::sessions::SessionManager;
 use crate::storage::event_store::EventStore;
 use crate::storage::log_store::LogStore;
 use crate::storage::metric_store::MetricStore;
+use crate::storage::otlp_forwarder::OtlpForwarder;
 
 /// Primitives the runtime hands to the HTTP API layer.
 ///
@@ -49,4 +50,9 @@ pub struct RuntimeContext {
     pub error_tracker: Arc<ErrorTracker>,
     pub sourcemap_store: Arc<SourcemapStore>,
     pub audit_log: Arc<AuditLog>,
+    /// Optional OTLP HTTP forwarder. `Some` when
+    /// `config.otlp_forwarder.enabled = true`; ingest handlers tee
+    /// the original OTLP request to it before dispatching to
+    /// storage. `None` is the default (no extra cost).
+    pub otlp_forwarder: Option<Arc<OtlpForwarder>>,
 }

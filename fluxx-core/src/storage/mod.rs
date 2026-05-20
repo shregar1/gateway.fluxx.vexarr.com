@@ -13,6 +13,8 @@ pub mod duckdb_metric;
 pub mod write_through_log;
 pub mod write_through_event;
 pub mod write_through_metric;
+pub mod otlp_forwarder;
+pub mod cold_archiver;
 
 pub use event_store::{EventStore, TimeWindow};
 pub use in_memory::InMemoryEventStore;
@@ -27,6 +29,8 @@ pub use duckdb_metric::DuckDbMetricStore;
 pub use write_through_log::WriteThroughLogStore;
 pub use write_through_event::WriteThroughEventStore;
 pub use write_through_metric::WriteThroughMetricStore;
+pub use otlp_forwarder::{OtlpForwarder, OtlpForwarderOptions};
+pub use cold_archiver::{ColdArchiver, ColdArchiverOptions};
 pub mod tiered;
 pub mod wal;
 pub mod cold;

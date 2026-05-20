@@ -20,6 +20,81 @@ pub struct Config {
     pub clickhouse_error_events: ClickHouseErrorEventsConfig,
     #[serde(default)]
     pub duckdb: DuckDbConfig,
+    #[serde(default)]
+    pub otlp_forwarder: OtlpForwarderConfig,
+    #[serde(default)]
+    pub cold_archive: ColdArchiveConfig,
+}
+
+/// Cold-tier archiver: periodically COPY DuckDB rows older than
+/// `older_than_*_secs` to Parquet files at `output_base` (local FS
+/// path or `s3://...` URL). Gated on `duckdb.enabled = true` since
+/// the archiver runs DuckDB `COPY TO PARQUET` queries against the
+/// active DuckDB tables.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ColdArchiveConfig {
+    pub enabled: bool,
+    /// Local path (`/var/lib/fluxx/cold`) or S3 prefix
+    /// (`s3://bucket/fluxx-cold`). Files are written as
+    /// `<output_base>/<signal>-<cutoff_us>.parquet`.
+    pub output_base: String,
+    pub interval_secs: u64,
+    /// Per-signal retention windows. Logs and traces default to
+    /// 1 day; metrics default to 7 days (cheaper to store, more
+    /// useful long-range).
+    pub older_than_logs_secs: u64,
+    pub older_than_traces_secs: u64,
+    pub older_than_metrics_secs: u64,
+    /// When true, archived rows are DELETEd from the hot DuckDB
+    /// after the Parquet write completes. When false the archive
+    /// is additive (duplicates accumulate over runs but the hot
+    /// tier never shrinks).
+    pub delete_after_archive: bool,
+}
+
+impl Default for ColdArchiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            output_base: "/var/lib/fluxx/cold".to_string(),
+            interval_secs: 3600,                 // hourly sweep
+            older_than_logs_secs: 86_400,        // 1 day
+            older_than_traces_secs: 86_400,      // 1 day
+            older_than_metrics_secs: 7 * 86_400, // 7 days
+            delete_after_archive: true,
+        }
+    }
+}
+
+/// Forward every received OTLP payload to a downstream OTLP-receiving
+/// endpoint (an OTel Collector, Datadog Agent, Tempo, Loki, etc.).
+/// The universal escape hatch — covers every backend the OTel
+/// Collector has an exporter for. Off by default.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OtlpForwarderConfig {
+    pub enabled: bool,
+    /// Base URL of the downstream OTLP HTTP receiver. Forwarder
+    /// posts to `{endpoint}/v1/{traces|metrics|logs}`.
+    pub endpoint: String,
+    pub timeout_secs: u64,
+    /// Bounded async channel size per signal. Saturation drops the
+    /// forwarded copy with a warn; ingest never blocks.
+    pub channel_capacity: usize,
+    /// Optional bearer token, sent as `Authorization: Bearer ...`
+    /// to the downstream endpoint.
+    pub bearer_token: Option<String>,
+}
+
+impl Default for OtlpForwarderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "http://localhost:4318".to_string(),
+            timeout_secs: 10,
+            channel_capacity: 10_000,
+            bearer_token: None,
+        }
+    }
 }
 
 /// Single embedded DuckDB persistent backend for events, logs, and
@@ -264,6 +339,8 @@ impl Default for Config {
             metric_alerts: MetricAlertConfig::default(),
             clickhouse_error_events: ClickHouseErrorEventsConfig::default(),
             duckdb: DuckDbConfig::default(),
+            otlp_forwarder: OtlpForwarderConfig::default(),
+            cold_archive: ColdArchiveConfig::default(),
         }
     }
 }
