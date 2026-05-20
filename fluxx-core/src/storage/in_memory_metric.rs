@@ -9,15 +9,27 @@ use tokio::sync::RwLock;
 /// In-memory metric store using BTreeMap for efficient time-range queries.
 #[derive(Debug)]
 pub struct InMemoryMetricStore {
-    data: RwLock<BTreeMap<u64, Vec<Metric>>>,
+    data: RwLock<MetricShard>,
     names: RwLock<HashSet<String>>,
+    max_entries: usize,
+}
+
+#[derive(Debug, Default)]
+struct MetricShard {
+    map: BTreeMap<u64, Vec<Metric>>,
+    total: usize,
 }
 
 impl InMemoryMetricStore {
     pub fn new() -> Self {
+        Self::with_max_entries(1_000_000)
+    }
+
+    pub fn with_max_entries(max_entries: usize) -> Self {
         Self {
-            data: RwLock::new(BTreeMap::new()),
+            data: RwLock::new(MetricShard::default()),
             names: RwLock::new(HashSet::new()),
+            max_entries,
         }
     }
 }
@@ -30,7 +42,16 @@ impl MetricStore for InMemoryMetricStore {
             names.insert(metric.name.clone());
         }
         let mut data = self.data.write().await;
-        data.entry(metric.timestamp_us).or_default().push(metric);
+        let ts = metric.timestamp_us;
+        data.map.entry(ts).or_default().push(metric);
+        data.total += 1;
+
+        while data.total > self.max_entries {
+            match data.map.pop_first() {
+                Some((_, ms)) => data.total -= ms.len(),
+                None => break,
+            }
+        }
         Ok(())
     }
 
@@ -43,7 +64,7 @@ impl MetricStore for InMemoryMetricStore {
         let data = self.data.read().await;
         let mut results = Vec::new();
 
-        for (_ts, metrics) in data.range(window.start_us..=window.end_us) {
+        for (_ts, metrics) in data.map.range(window.start_us..=window.end_us) {
             for m in metrics {
                 if let Some(n) = name {
                     if m.name != n {
@@ -75,7 +96,7 @@ impl MetricStore for InMemoryMetricStore {
         // Bucket values by interval
         let mut buckets: BTreeMap<u64, Vec<f64>> = BTreeMap::new();
 
-        for (_ts, metrics) in data.range(window.start_us..=window.end_us) {
+        for (_ts, metrics) in data.map.range(window.start_us..=window.end_us) {
             for m in metrics {
                 if m.name != name {
                     continue;
@@ -102,7 +123,7 @@ impl MetricStore for InMemoryMetricStore {
 
     async fn len(&self) -> Result<usize> {
         let data = self.data.read().await;
-        Ok(data.values().map(|v| v.len()).sum())
+        Ok(data.total)
     }
 }
 

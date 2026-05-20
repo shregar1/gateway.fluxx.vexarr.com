@@ -7,45 +7,74 @@ use std::sync::{Arc, RwLock};
 
 /// InMemoryEventStore: Chronological persistence using a BTreeMap index.
 /// Focused purely on pluggable storage and range retrieval efficiency.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InMemoryEventStore {
-    events: Arc<RwLock<BTreeMap<u64, Vec<Event>>>>,
+    events: Arc<RwLock<EventShard>>,
+    max_entries: usize,
+}
+
+#[derive(Debug, Default)]
+struct EventShard {
+    map: BTreeMap<u64, Vec<Event>>,
+    total: usize,
 }
 
 impl InMemoryEventStore {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_max_entries(1_000_000)
+    }
+
+    pub fn with_max_entries(max_entries: usize) -> Self {
+        Self {
+            events: Arc::new(RwLock::new(EventShard::default())),
+            max_entries,
+        }
+    }
+}
+
+impl Default for InMemoryEventStore {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait]
 impl EventStore for InMemoryEventStore {
     async fn insert(&self, event: Event) -> Result<()> {
-        let mut map = self.events.write().expect("RwLock poisoned");
-        map.entry(event.timestamp_us).or_default().push(event);
+        let mut data = self.events.write().expect("RwLock poisoned");
+        let ts = event.timestamp_us;
+        data.map.entry(ts).or_default().push(event);
+        data.total += 1;
+
+        while data.total > self.max_entries {
+            match data.map.pop_first() {
+                Some((_, evs)) => data.total -= evs.len(),
+                None => break,
+            }
+        }
         Ok(())
     }
 
     async fn query(&self, window: TimeWindow) -> Result<Vec<Event>> {
-        let map = self.events.read().expect("RwLock poisoned");
-        
+        let data = self.events.read().expect("RwLock poisoned");
+
         // BTreeMap provides an efficient O(log N) range scan for time windows.
-        let events = map.range(window.start_us..=window.end_us)
+        let events = data.map.range(window.start_us..=window.end_us)
             .flat_map(|(_, evs)| evs.clone())
             .collect();
-            
+
         Ok(events)
     }
 
     async fn len(&self) -> Result<usize> {
-        let map = self.events.read().expect("RwLock poisoned");
-        Ok(map.values().map(|v| v.len()).sum())
+        let data = self.events.read().expect("RwLock poisoned");
+        Ok(data.total)
     }
 
     async fn list_events(&self, project_id: Option<String>, protocol: Option<crate::models::event::ProtocolType>, severity: Option<crate::models::event::EventSeverity>, service_id: Option<String>) -> Vec<Event> {
-        let map = self.events.read().expect("RwLock poisoned");
-        
-        map.values()
+        let data = self.events.read().expect("RwLock poisoned");
+
+        data.map.values()
             .flat_map(|evs| evs.iter())
             .filter(|ev| {
                 let project_match = project_id.is_none() || ev.project_id == project_id;
@@ -59,19 +88,19 @@ impl EventStore for InMemoryEventStore {
     }
 
     async fn list_events_since(&self, since_us: u64) -> Vec<Event> {
-        let map = self.events.read().expect("RwLock poisoned");
+        let data = self.events.read().expect("RwLock poisoned");
         // BTreeMap range scan: only visit keys > since_us.
-        map.range((std::ops::Bound::Excluded(since_us), std::ops::Bound::Unbounded))
+        data.map.range((std::ops::Bound::Excluded(since_us), std::ops::Bound::Unbounded))
             .flat_map(|(_, evs)| evs.iter().cloned())
             .collect()
     }
 
     async fn get_stats(&self) -> serde_json::Value {
-        let map = self.events.read().expect("RwLock poisoned");
-        let total = map.values().map(|v| v.len()).sum::<usize>();
-        
+        let data = self.events.read().expect("RwLock poisoned");
+        let total = data.total;
+
         let mut protocol_counts = std::collections::HashMap::new();
-        for evs in map.values() {
+        for evs in data.map.values() {
             for ev in evs {
                 *protocol_counts.entry(format!("{:?}", ev.protocol)).or_insert(0) += 1;
             }
@@ -79,7 +108,7 @@ impl EventStore for InMemoryEventStore {
 
         serde_json::json!({
             "total_events": total,
-            "unique_time_buckets": map.len(),
+            "unique_time_buckets": data.map.len(),
             "protocols": protocol_counts
         })
     }
