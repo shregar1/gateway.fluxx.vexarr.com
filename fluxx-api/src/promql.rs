@@ -73,6 +73,20 @@ enum MathFunc { Abs, Ceil, Floor, Sqrt, Ln, Exp, Round }
 #[derive(Debug, Clone, Copy)]
 enum BinOp { Add, Sub, Mul, Div, Mod, Gt, Lt, Gte, Lte, Eq, Neq }
 
+/// Parse + evaluate a PromQL expression. The handler at
+/// `/v1/query` wraps this in fluxx's StandardResponse; the
+/// `prometheus_api` module wraps it in the canonical Prometheus
+/// JSON envelope for Grafana / promql-cli compatibility.
+pub async fn evaluate_promql(
+    state: &Arc<ApiState>,
+    q: &str,
+    now_us: u64,
+    lookback_us: u64,
+) -> Result<QueryResult, String> {
+    let expr = parse_promql(q)?;
+    evaluate(expr, state, now_us, lookback_us).await
+}
+
 /// GET /v1/query
 pub async fn query(
     State(state): State<Arc<ApiState>>,
