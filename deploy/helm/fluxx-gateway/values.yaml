@@ -1,0 +1,67 @@
+# Default values for fluxx-gateway.
+
+image:
+  repository: ghcr.io/shregar1/fluxx-gateway
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# Ports the container exposes — match the [server] / [otlp] blocks
+# in the rendered config.
+ports:
+  api: 7007
+  otlpHttp: 4318
+  otlpGrpc: 4317
+
+service:
+  type: ClusterIP
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 2
+    memory: 4Gi
+
+# Set persistence.enabled = true and switch the backend in `config`
+# below to "duckdb" or "wal" when you need durability beyond the pod
+# lifetime.
+persistence:
+  enabled: false
+  size: 10Gi
+  storageClass: ""
+
+# Inline fluxx config. Mounted into the container at /etc/fluxx/fluxx.toml.
+# See fluxx-core/src/config/mod.rs for the full schema (DuckDB, ClickHouse,
+# OTel forwarder, cold-tier archive, sampling, cardinality budget, ...).
+config: |
+  agent_name = "fluxx-helm"
+  log_level = "info"
+
+  [server]
+  host = "0.0.0.0"
+  port = 7007
+
+  [otlp]
+  enabled = true
+  grpc_port = 4317
+  http_enabled = true
+  http_port = 4318
+
+  [logs]
+  enabled = true
+  max_entries = 1000000
+  retention_secs = 86400
+  backend = "memory"
+
+env:
+  RUST_LOG: "info,fluxx_core=info,fluxx_api=info"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
