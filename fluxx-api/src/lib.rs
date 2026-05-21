@@ -35,6 +35,7 @@ pub mod pipelines;
 pub mod predictive;
 pub mod profiling;
 pub mod prometheus;
+pub mod prometheus_api;
 pub mod promql;
 pub mod quotas;
 pub mod recording_rules;

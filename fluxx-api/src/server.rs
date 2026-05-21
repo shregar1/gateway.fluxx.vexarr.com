@@ -531,8 +531,16 @@ impl ApiServer {
             .route("/v1/service-map", get(crate::service_map::get_service_map))
             // Deploy annotations
             .route("/v1/annotations", post(crate::annotations::create_annotation).get(crate::annotations::list_annotations))
-            // PromQL-compatible query engine
+            // PromQL-compatible query engine (fluxx-native envelope).
             .route("/v1/query", get(crate::promql::query))
+            // Prometheus-canonical HTTP API surface. Path-compatible
+            // with the Grafana Prometheus datasource so existing
+            // PromQL dashboards work against fluxx with zero config
+            // beyond the URL.
+            .route("/api/v1/query", get(crate::prometheus_api::api_v1_query))
+            .route("/api/v1/query_range", get(crate::prometheus_api::api_v1_query_range))
+            .route("/api/v1/labels", get(crate::prometheus_api::api_v1_labels))
+            .route("/api/v1/label/:name/values", get(crate::prometheus_api::api_v1_label_values))
             // Traces: GET lists/searches stored traces, POST accepts
             // OTLP HTTP/JSON so every OTel SDK is a drop-in producer.
             .route("/v1/traces",
