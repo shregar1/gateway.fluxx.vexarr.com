@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluxx-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fluxx-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fluxx-gateway
+    spec:
+      containers:
+        - name: fluxx
+          image: ghcr.io/shregar1/fluxx-gateway:latest
+          imagePullPolicy: IfNotPresent
+          args: ["start", "--config", "/etc/fluxx/fluxx.toml"]
+          ports:
+            - name: api
+              containerPort: 7007
+              protocol: TCP
+            - name: otlp-http
+              containerPort: 4318
+              protocol: TCP
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: "info,fluxx_core=info,fluxx_api=info"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fluxx
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/fluxx
+          # Probes hit the API listener, not the OTLP one — fluxx
+          # answers `/v1/stats` even when no events have flowed yet.
+          readinessProbe:
+            httpGet:
+              path: /v1/stats
+              port: api
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /v1/stats
+              port: api
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+      volumes:
+        - name: config
+          configMap:
+            name: fluxx-config
+        # In-memory backend: emptyDir is fine. Switch to a
+        # persistentVolumeClaim once DuckDB persistence is enabled.
+        - name: data
+          emptyDir: {}

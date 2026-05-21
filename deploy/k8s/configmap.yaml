@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluxx-config
+data:
+  # Minimal in-memory-only config. To turn on DuckDB persistence,
+  # ClickHouse, OTel forwarding, etc., add the [duckdb] / [clickhouse]
+  # / [otlp_forwarder] / [cold_archive] / [sampling] / [cardinality]
+  # blocks here — see fluxx-core/src/config/mod.rs for the full schema.
+  fluxx.toml: |
+    agent_name = "fluxx-k8s"
+    log_level = "info"
+
+    [server]
+    host = "0.0.0.0"
+    port = 7007
+
+    [otlp]
+    enabled = true
+    grpc_port = 4317
+    http_enabled = true
+    http_port = 4318
+
+    [logs]
+    enabled = true
+    max_entries = 1000000
+    retention_secs = 86400
+    backend = "memory"

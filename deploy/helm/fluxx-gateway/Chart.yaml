@@ -1,0 +1,16 @@
+apiVersion: v2
+name: fluxx-gateway
+description: Self-hosted OpenTelemetry gateway with in-memory / DuckDB / ClickHouse backends
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - opentelemetry
+  - observability
+  - tracing
+  - metrics
+  - logs
+sources:
+  - https://github.com/shregar1/gateway.fluxx.vexarr.com
+maintainers:
+  - name: fluxx team
