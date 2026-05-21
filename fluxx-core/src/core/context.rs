@@ -28,6 +28,7 @@ use crate::models::event::Event;
 use crate::models::log_entry::LogEntry;
 use crate::models::metric::Metric;
 use crate::security::audit::AuditLog;
+use crate::cardinality::CardinalityTracker;
 use crate::sessions::SessionManager;
 use crate::storage::event_store::EventStore;
 use crate::storage::log_store::LogStore;
@@ -49,4 +50,7 @@ pub struct RuntimeContext {
     pub error_tracker: Arc<ErrorTracker>,
     pub sourcemap_store: Arc<SourcemapStore>,
     pub audit_log: Arc<AuditLog>,
+    /// Per-metric cardinality budget. When disabled in config
+    /// every `admit()` returns `Allow` (one atomic increment).
+    pub cardinality: Arc<CardinalityTracker>,
 }

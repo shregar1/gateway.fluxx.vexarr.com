@@ -489,6 +489,21 @@ impl AgentService {
             info!("Runtime: Anomaly detector enabled (60s interval)");
         }
 
+        let cardinality = Arc::new(crate::cardinality::CardinalityTracker::new(
+            crate::cardinality::CardinalityConfig {
+                enabled: config.cardinality.enabled,
+                max_series_per_metric: config.cardinality.max_series_per_metric,
+                max_total_series: config.cardinality.max_total_series,
+            },
+        ));
+        if config.cardinality.enabled {
+            info!(
+                "Runtime: cardinality budget enabled (per_metric={}, total={})",
+                config.cardinality.max_series_per_metric,
+                config.cardinality.max_total_series,
+            );
+        }
+
         self.config = Some(config);
 
         Ok(RuntimeContext {
@@ -502,6 +517,7 @@ impl AgentService {
             error_tracker,
             sourcemap_store,
             audit_log,
+            cardinality,
         })
     }
 

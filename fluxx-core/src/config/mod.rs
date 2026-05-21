@@ -20,6 +20,38 @@ pub struct Config {
     pub clickhouse_error_events: ClickHouseErrorEventsConfig,
     #[serde(default)]
     pub duckdb: DuckDbConfig,
+    #[serde(default)]
+    pub cardinality: CardinalityConfig,
+}
+
+/// Per-metric cardinality budget — caps the number of distinct
+/// time series (one per unique tag combination) allowed per
+/// metric name, and a global cap as a safety net. Off by default;
+/// when on, drops new-series samples past the cap with a counter
+/// increment.
+///
+/// Datadog charges to lift cardinality caps. We make this free
+/// and visible — `kept` and `rejected` counters are exposed via
+/// the stats endpoint.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CardinalityConfig {
+    pub enabled: bool,
+    /// Max distinct series per metric name. `0` disables the
+    /// per-metric cap (only the global cap applies).
+    pub max_series_per_metric: usize,
+    /// Max distinct series across all metrics. `0` disables the
+    /// global cap (only per-metric applies).
+    pub max_total_series: usize,
+}
+
+impl Default for CardinalityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_series_per_metric: 10_000,
+            max_total_series: 1_000_000,
+        }
+    }
 }
 
 /// Single embedded DuckDB persistent backend for events, logs, and
@@ -264,6 +296,7 @@ impl Default for Config {
             metric_alerts: MetricAlertConfig::default(),
             clickhouse_error_events: ClickHouseErrorEventsConfig::default(),
             duckdb: DuckDbConfig::default(),
+            cardinality: CardinalityConfig::default(),
         }
     }
 }
@@ -375,6 +408,7 @@ mod tests {
             metric_alerts: MetricAlertConfig::default(),
             clickhouse_error_events: ClickHouseErrorEventsConfig::default(),
             duckdb: DuckDbConfig::default(),
+            cardinality: CardinalityConfig::default(),
         };
         assert_eq!(config.agent_name, "custom-agent");
         assert_eq!(config.server.port, 9090);
