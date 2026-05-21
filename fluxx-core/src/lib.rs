@@ -17,6 +17,7 @@ pub mod comparison;
 // `fluxx` binary in `src/main.rs` wires them together — that keeps
 // fluxx-core itself free of any api dependency and breaks the cycle
 // that would otherwise form (api -> core -> api).
+pub mod cardinality;
 pub mod replay;
 pub mod sessions;
 pub mod storage;

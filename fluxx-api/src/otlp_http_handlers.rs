@@ -14,6 +14,7 @@
 //!     extracts `State` + `Json` and delegates to the inner helper.
 
 use crate::{ApiState, StandardResponse};
+use fluxx_core::cardinality::CardinalityDecision;
 use fluxx_core::protocols::otlp::convert;
 use axum::{
     extract::State,
@@ -46,21 +47,32 @@ pub async fn write_otlp_traces(state: &Arc<ApiState>, request: ExportTraceServic
 }
 
 /// Write a parsed OTLP metric request into the metric store / bus.
-/// Returns the number of metric data points accepted.
+/// Returns the number of metric data points accepted *after*
+/// cardinality enforcement. When the cardinality budget is
+/// configured, new-series samples past the per-metric or global
+/// cap are dropped (counter incremented on the tracker).
 pub async fn write_otlp_metrics(state: &Arc<ApiState>, request: ExportMetricsServiceRequest) -> usize {
     let metrics = convert::otlp_metrics_to_metrics(&request.resource_metrics);
-    let count = metrics.len();
+    let mut accepted = 0usize;
 
     for metric in metrics {
-        let metric_arc = Arc::new(metric.clone());
-        let _ = state.metric_bus.send(metric_arc);
-        if let Err(e) = state.metric_store.insert(metric).await {
-            error!("OTLP HTTP metric store error: {}", e);
+        // Live-tail subscribers always see the full stream; only
+        // durable storage is gated by the cardinality budget.
+        let _ = state.metric_bus.send(Arc::new(metric.clone()));
+        match state.cardinality.admit(&metric) {
+            CardinalityDecision::Allow => {
+                if let Err(e) = state.metric_store.insert(metric).await {
+                    error!("OTLP HTTP metric store error: {}", e);
+                } else {
+                    accepted += 1;
+                }
+            }
+            CardinalityDecision::Reject => {}
         }
     }
 
-    info!("OTLP HTTP: Ingested {} metric data points", count);
-    count
+    info!("OTLP HTTP: Stored {} metric data points (after cardinality budget)", accepted);
+    accepted
 }
 
 /// Write a parsed OTLP log request into the log store.
