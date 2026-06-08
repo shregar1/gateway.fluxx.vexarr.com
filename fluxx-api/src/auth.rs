@@ -152,9 +152,9 @@ pub async fn verify_api_key(
         if let Some(operator_key) = fluxx_api_key {
             // Defense-in-depth fast path: the submitted key must match
             // the operator's FLUXX_API_KEY before we bother the auth
-            // server. Constant-time compare so timing doesn't leak
-            // which prefix matches.
-            if !constant_time_eq(trimmed.as_bytes(), operator_key.as_bytes()) {
+            // server. Constant-time compare (via utilx::auth) so timing
+            // doesn't leak which prefix matches.
+            if !utilx::auth::constant_time_eq(trimmed.as_bytes(), operator_key.as_bytes()) {
                 return StandardResponse::error(
                     Value::Null,
                     "Key does not match this node's configured FLUXX_API_KEY.",
@@ -202,17 +202,6 @@ pub async fn verify_api_key(
         "API key accepted (dev passthrough — auth not configured).",
     )
     .into_response()
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
 }
 
 async fn verify_with_auth(

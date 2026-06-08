@@ -21,3 +21,9 @@ debug = "line-tables-only"
 [profile.dev]
 opt-level = 0
 debug = true
+
+# Redirect the shared vexarr utility crate at `core.utilx.vexarr.com` to a
+# local checkout for dev builds. Production builds resolve via the git URL
+# in each member crate's `[dependencies]` block.
+[patch."https://github.com/shregar1/core.utilx.vexarr.com"]
+utilx = { path = "../../utilx/core.utilx.vexarr.com" }

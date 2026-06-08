@@ -11,14 +11,17 @@
 //! bytes concatenated. The server computes the same string and compares in
 //! constant time. Re-serializing the body (e.g. through `serde_json` on the
 //! server) would mismatch — the agent **must** sign the same bytes it sends.
+//!
+//! The producer primitives now live in `utilx::auth::hmac` (alongside the
+//! matching verifier — `utilx::auth::hmac::verify_signed`). This module
+//! keeps fluxx's hex-decoded-key + `Signature` shape so call sites stay
+//! source-compatible, delegating the HMAC + nonce generation to utilx.
 
-use hmac::{Hmac, Mac};
-use rand::RngCore;
-use sha2::Sha256;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-type HmacSha256 = Hmac<Sha256>;
-
+/// Signed-request envelope for a premium call.
+///
+/// The fluxx wire shape (hex `signature` field) is preserved for backward
+/// compatibility with on-disk caches + integration tests. Internally this is
+/// the same envelope as [`utilx::auth::hmac::SignedEnvelope`].
 #[derive(Debug, Clone)]
 pub struct Signature {
     pub nonce: String,
@@ -27,35 +30,33 @@ pub struct Signature {
 }
 
 /// Sign a premium request body with the per-grant HMAC key.
+///
+/// `hmac_key_hex` is the hex-encoded per-grant key delivered by the control
+/// plane. The key is hex-decoded once, then the producer-side envelope
+/// (nonce + unix-seconds + HMAC over `body || nonce || timestamp`) is built
+/// by `utilx::auth::hmac::sign_request_now`.
 pub fn sign(body: &[u8], hmac_key_hex: &str) -> Result<Signature, SigningError> {
     let key = hex::decode(hmac_key_hex).map_err(|_| SigningError::BadHmacKey)?;
-    let nonce = fresh_nonce();
-    let timestamp = unix_seconds();
-    let signature = compute(body, nonce.as_bytes(), timestamp, &key);
-    Ok(Signature { nonce, timestamp, signature })
+    let env = utilx::auth::hmac::sign_request_now(body, &key);
+    Ok(Signature {
+        nonce: env.nonce,
+        timestamp: env.timestamp,
+        signature: env.signature_hex,
+    })
 }
 
 /// Compute the signature for an exact (body, nonce, timestamp, key). Pure;
-/// used by tests and by `sign()` above.
+/// used by tests and by `sign()` above. Delegates to utilx; preserved here
+/// so the existing test vectors continue to work.
 pub(crate) fn compute(body: &[u8], nonce: &[u8], timestamp: i64, key: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(body);
     mac.update(nonce);
     mac.update(timestamp.to_string().as_bytes());
     hex::encode(mac.finalize().into_bytes())
-}
-
-fn fresh_nonce() -> String {
-    let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    hex::encode(bytes)
-}
-
-fn unix_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -157,5 +158,17 @@ mod tests {
         let a = sign(b"x", KEY_HEX).unwrap();
         let b = sign(b"x", KEY_HEX).unwrap();
         assert_ne!(a.nonce, b.nonce);
+    }
+
+    #[test]
+    fn utilx_envelope_matches_local_compute() {
+        // The fluxx producer (`sign`) and the in-module `compute` helper must
+        // agree once we plug the SAME nonce + timestamp into both. This guards
+        // against silently changing the HMAC input ordering when the
+        // delegation switched to utilx::auth::hmac::sign_request_now.
+        let key = hex::decode(KEY_HEX).unwrap();
+        let env = utilx::auth::hmac::sign_request(b"hello", &key, 42);
+        let expected = compute(b"hello", env.nonce.as_bytes(), 42, &key);
+        assert_eq!(env.signature_hex, expected);
     }
 }

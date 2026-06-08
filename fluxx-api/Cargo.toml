@@ -25,6 +25,11 @@ bundled-dashboard = []
 # workspace stays buildable without a registry round-trip.
 fluxx-core = { path = "../fluxx-core" }
 
+# Shared vexarr utility crate. fluxx-api consumes the constant-time-eq
+# helper for the dashboard-broker bearer match in src/auth.rs. Same `[patch]`
+# redirect as in fluxx-core.
+utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["auth"] }
+
 # Web stack — kept aligned with what fluxx-core already pulls in so the
 # resolver doesn't pick conflicting versions.
 axum = { version = "0.7", features = ["macros", "ws", "multipart"] }

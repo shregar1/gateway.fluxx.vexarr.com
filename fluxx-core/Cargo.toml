@@ -32,6 +32,15 @@ bundled-install-scripts = []
 bundled-openclaw = []
 
 [dependencies]
+# Shared vexarr utility crate. fluxx consumes:
+#   - `tracecontext` for W3C TraceContext propagation
+#     (src/protocols/tracecontext.rs is a thin re-export)
+#   - `auth` for HMAC-SHA256 signed-request envelope
+#     (src/license/signing.rs delegates to utilx::auth::hmac::sign)
+# Workspace `[patch]` (see workspace Cargo.toml) redirects the git URL
+# to a local checkout for dev builds.
+utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["tracecontext", "auth"] }
+
 urlencoding = "2"
 num_cpus = "1.16"
 simd-json = { version = "0.13", features = ["serde_impl", "runtime-detection"] }
@@ -107,6 +116,11 @@ flate2 = "1"
 # no system libduckdb install. Adds ~5 min to a cold build but
 # matches the "one binary, no ops" positioning.
 duckdb = { version = "1.0", features = ["bundled"] }
+# DataFusion — SQL query engine over Parquet (and eventually S3).
+# Lets users query the cold-tier archive via ANSI SQL without
+# pointing a separate DuckDB at the files. Off the hot path —
+# only used when a /v1/sql request comes in.
+datafusion = { version = "43", default-features = false, features = ["parquet", "regex_expressions", "unicode_expressions"] }
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
