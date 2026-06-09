@@ -3,6 +3,12 @@
 //! The classic free-tier license verify lives in this file (it predates the
 //! grant subsystem). Premium agent operations should go through the new
 //! grant client in [`grant`] — see that module's docs for the full lifecycle.
+//!
+//! The HTTP plumbing (env-var resolution, URL building, offline fallback,
+//! ANSI error banner) now lives in `utilx::license::simple`. This file
+//! pins the fluxx-specific shape (`LicenseInfo` / `TierLimits` types,
+//! `FLUXX_API_KEY` / `FLUXX_API_URL` env names) and the human-readable
+//! error messages.
 
 pub mod cache;
 pub mod cert_pin;
@@ -11,10 +17,13 @@ pub mod grant;
 pub mod signing;
 
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
+use utilx::license::simple::{SimpleConfig, SimpleVerifyError, verify_simple};
 
 const DEFAULT_API_URL: &str = "https://api.fluxx.dev";
 
+/// Fluxx-shaped licence payload (what the server returns inside the
+/// `data` field of the StandardResponse envelope).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LicenseInfo {
     #[serde(default = "_default_valid")]
@@ -32,92 +41,74 @@ pub struct TierLimits {
     pub integrations: i64,
 }
 
-#[derive(Debug, Deserialize)]
-struct ApiEnvelope {
-    status: String,
-    data: Option<LicenseInfo>,
-    #[serde(rename = "responseMessage")]
-    response_message: String,
+fn _default_valid() -> bool {
+    true
 }
 
-fn _default_valid() -> bool { true }
+fn fluxx_simple_cfg() -> SimpleConfig {
+    SimpleConfig::for_product(
+        "FLUXX_API_KEY",
+        "FLUXX_API_URL",
+        "FLUXX_OFFLINE_MODE",
+        DEFAULT_API_URL,
+    )
+}
 
 pub async fn validate_subscription() -> Result<LicenseInfo, String> {
-    let api_key = std::env::var("FLUXX_API_KEY")
-        .map_err(|_| "FLUXX_API_KEY environment variable is not set.\n\nTo use Fluxx, you need an active subscription.\n  1. Sign up at https://dashboard.fluxx.dev\n  2. Choose a plan (Free tier available)\n  3. Copy your API key from the dashboard\n  4. Set it: export FLUXX_API_KEY=flx_your_key_here".to_string())?;
-
-    if api_key.is_empty() {
-        return Err("FLUXX_API_KEY is empty. Set a valid API key to continue.".to_string());
-    }
-
-    let api_url = std::env::var("FLUXX_API_URL")
-        .unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-
-    let url = format!("{}/api/v1/license/verify?key={}", api_url, urlencoding::encode(&api_key));
-    info!("Validating subscription against {}", api_url);
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| {
-            if std::env::var("FLUXX_OFFLINE_MODE").is_ok() {
-                warn!("License validation failed (offline mode enabled, continuing): {}", e);
-                return "OFFLINE_OK".to_string();
-            }
-            format!(
-                "Cannot reach Fluxx API at {}.\n  Check your network connection or set FLUXX_API_URL if self-hosting.\n  Error: {}",
-                api_url, e
-            )
-        })?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "License validation failed with HTTP {}.\n  Ensure your API key is correct.",
-            response.status()
-        ));
-    }
-
-    let envelope: ApiEnvelope = response
-        .json()
-        .await
-        .map_err(|e| format!("Invalid response from license server: {}", e))?;
-
-    if envelope.status != "SUCCESS" {
-        return Err(format!("License check failed: {}", envelope.response_message));
-    }
-
-    let license = envelope.data.ok_or("No license data in response")?;
-
-    if !license.valid {
-        return Err(
-            "Your API key is invalid or your subscription is not active.\n\n  Manage your subscription at https://dashboard.fluxx.dev/settings".to_string()
-        );
-    }
-
+    let cfg = fluxx_simple_cfg();
     info!(
-        "Subscription validated: tier={}, expires={}",
-        license.tier.as_deref().unwrap_or("unknown"),
-        license.expires_at.as_deref().unwrap_or("unknown")
+        "Validating subscription against {}",
+        std::env::var(cfg.env_api_url).unwrap_or_else(|_| cfg.default_api_url.to_string())
     );
 
-    Ok(license)
+    match verify_simple::<LicenseInfo>(&cfg).await {
+        Ok(license) => {
+            if !license.valid {
+                return Err(
+                    "Your API key is invalid or your subscription is not active.\n\n  Manage your subscription at https://dashboard.fluxx.dev/settings".to_string()
+                );
+            }
+            info!(
+                "Subscription validated: tier={}, expires={}",
+                license.tier.as_deref().unwrap_or("unknown"),
+                license.expires_at.as_deref().unwrap_or("unknown")
+            );
+            Ok(license)
+        }
+        Err(SimpleVerifyError::MissingApiKey { .. }) => Err(
+            "FLUXX_API_KEY environment variable is not set.\n\nTo use Fluxx, you need an active subscription.\n  1. Sign up at https://dashboard.fluxx.dev\n  2. Choose a plan (Free tier available)\n  3. Copy your API key from the dashboard\n  4. Set it: export FLUXX_API_KEY=flx_your_key_here".to_string()
+        ),
+        Err(SimpleVerifyError::EmptyApiKey { .. }) => Err(
+            "FLUXX_API_KEY is empty. Set a valid API key to continue.".to_string(),
+        ),
+        Err(SimpleVerifyError::HttpClient(e)) => {
+            Err(format!("Failed to create HTTP client: {e}"))
+        }
+        Err(SimpleVerifyError::OfflineOk(_)) => Err("OFFLINE_OK".to_string()),
+        Err(SimpleVerifyError::Network { url, cause }) => Err(format!(
+            "Cannot reach Fluxx API at {url}.\n  Check your network connection or set FLUXX_API_URL if self-hosting.\n  Error: {cause}"
+        )),
+        Err(SimpleVerifyError::BadStatus(s)) => Err(format!(
+            "License validation failed with HTTP {s}.\n  Ensure your API key is correct."
+        )),
+        Err(SimpleVerifyError::BadJson(e)) => {
+            Err(format!("Invalid response from license server: {e}"))
+        }
+        Err(SimpleVerifyError::ServerFailed(msg)) => {
+            Err(format!("License check failed: {msg}"))
+        }
+        Err(SimpleVerifyError::MissingData) => Err("No license data in response".to_string()),
+        // `SimpleVerifyError` is `#[non_exhaustive]` so this catch-all
+        // future-proofs us against utilx adding new variants.
+        Err(other) => Err(format!("License check failed: {other}")),
+    }
 }
 
+/// Print the fluxx-styled subscription-required banner to stderr.
 pub fn print_license_error(msg: &str) {
-    eprintln!();
-    eprintln!("  \x1b[1;31mSubscription Required\x1b[0m");
-    eprintln!("  {}", "─".repeat(40));
-    for line in msg.lines() {
-        eprintln!("  {}", line);
-    }
-    eprintln!();
-    eprintln!("  \x1b[2mFluxx requires an active subscription to run.");
-    eprintln!("  Sign up free at https://dashboard.fluxx.dev\x1b[0m");
-    eprintln!();
+    utilx::license::simple::print_error_banner(
+        "Subscription Required",
+        msg,
+        "Fluxx requires an active subscription to run.\n  Sign up free at https://dashboard.fluxx.dev",
+    );
 }

@@ -45,7 +45,7 @@ bundled-openclaw = []
 #     (src/license/cert_pin.rs is a thin re-export)
 # Workspace `[patch]` (see workspace Cargo.toml) redirects the git URL
 # to a local checkout for dev builds.
-utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["tracecontext", "auth", "logging", "fingerprint", "tls-pin"] }
+utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["tracecontext", "auth", "logging", "fingerprint", "tls-pin", "cache", "license"] }
 
 urlencoding = "2"
 num_cpus = "1.16"

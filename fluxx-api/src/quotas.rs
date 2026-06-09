@@ -2,18 +2,26 @@
 //!
 //! Per-project/team ingestion quotas with configurable limits.
 //! Prevents runaway costs and noisy-neighbor problems in multi-tenant deployments.
+//!
+//! The per-key + per-signal counting + window reset + drop/throttle/warn
+//! policy lives in `utilx::ratelimit::multi_dim`. This file owns the
+//! fluxx-specific shape: the named `QuotaDefinition` fields the dashboard
+//! posts, the named `QuotaUsage` fields the dashboard reads, and the
+//! axum handlers wired into StandardResponse.
 
 use crate::{ApiState, StandardResponse};
 use axum::{
-    extract::{State, Path},
-    response::IntoResponse,
     Json,
+    extract::{Path, State},
+    response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
-use parking_lot::RwLock;
+use std::time::Duration;
+use utilx::ratelimit::multi_dim::{
+    CheckResult, ExceededAction, MultiDimConfig, MultiDimLimiter, UsageSnapshot,
+};
 
 /// Quota definition for a project or team.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +43,31 @@ pub struct QuotaDefinition {
     pub enabled: bool,
 }
 
+impl QuotaDefinition {
+    /// Project the fluxx-shaped quota into the generic utilx multi-dim
+    /// config. "warn" is the safe fallback for unrecognised actions —
+    /// matches the historical fluxx behaviour where an unknown action
+    /// admitted the traffic.
+    fn to_multi_dim(&self) -> MultiDimConfig {
+        let mut signal_limits = HashMap::new();
+        signal_limits.insert("events".to_string(), self.events_per_minute);
+        signal_limits.insert("logs".to_string(), self.logs_per_minute);
+        signal_limits.insert("metrics".to_string(), self.metrics_per_minute);
+        signal_limits.insert("spans".to_string(), self.spans_per_minute);
+        let action = ExceededAction::parse(&self.exceeded_action).unwrap_or(ExceededAction::Warn);
+        MultiDimConfig {
+            window: Duration::from_secs(60),
+            signal_limits,
+            // Unknown signals fall under "events" semantics in the
+            // historical fluxx behaviour — apply the events ceiling.
+            default_signal_limit: self.events_per_minute,
+            bytes_limit: self.bytes_per_minute,
+            action,
+            enabled: self.enabled,
+        }
+    }
+}
+
 /// Current usage tracked against quotas.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaUsage {
@@ -49,32 +82,19 @@ pub struct QuotaUsage {
     pub dropped_count: u64,
 }
 
-/// Rate limiter state per project.
-#[derive(Debug)]
-struct RateLimiterState {
-    events: u64,
-    logs: u64,
-    metrics: u64,
-    spans: u64,
-    bytes: u64,
-    throttled: u64,
-    dropped: u64,
-    window_start: Instant,
-}
-
-impl RateLimiterState {
-    fn new() -> Self {
+impl QuotaUsage {
+    fn from_snapshot(project_id: &str, snap: &UsageSnapshot) -> Self {
+        let get = |k: &str| snap.signal_counts.get(k).copied().unwrap_or(0);
         Self {
-            events: 0, logs: 0, metrics: 0, spans: 0, bytes: 0,
-            throttled: 0, dropped: 0, window_start: Instant::now(),
-        }
-    }
-
-    fn reset_if_expired(&mut self) {
-        if self.window_start.elapsed() > Duration::from_secs(60) {
-            self.events = 0; self.logs = 0; self.metrics = 0;
-            self.spans = 0; self.bytes = 0; self.throttled = 0;
-            self.dropped = 0; self.window_start = Instant::now();
+            project_id: project_id.to_string(),
+            window_start: snap.window_start_us,
+            events_count: get("events"),
+            logs_count: get("logs"),
+            metrics_count: get("metrics"),
+            spans_count: get("spans"),
+            bytes_count: snap.bytes_count,
+            throttled_count: snap.throttled_count,
+            dropped_count: snap.dropped_count,
         }
     }
 }
@@ -87,23 +107,43 @@ pub enum RateLimitResult {
     Dropped,
 }
 
+impl From<CheckResult> for RateLimitResult {
+    fn from(r: CheckResult) -> Self {
+        match r {
+            // `Warned` still admits the traffic — historical fluxx behaviour
+            // for "warn" reported `Allowed` to callers, with the counter
+            // moving and surfacing later in QuotaUsage. Preserve that.
+            CheckResult::Allowed | CheckResult::Warned => Self::Allowed,
+            CheckResult::Throttled => Self::Throttled,
+            CheckResult::Dropped => Self::Dropped,
+        }
+    }
+}
+
 /// Quota Manager: tracks usage and enforces limits.
+///
+/// Owns the source-of-truth `QuotaDefinition` map (fluxx-shaped, what the
+/// dashboard reads/writes) and projects it into the generic
+/// `utilx::ratelimit::multi_dim::MultiDimLimiter` for the actual counting.
 #[derive(Debug)]
 pub struct QuotaManager {
-    quotas: RwLock<HashMap<String, QuotaDefinition>>,
-    usage: RwLock<HashMap<String, RateLimiterState>>,
+    quotas: parking_lot::RwLock<HashMap<String, QuotaDefinition>>,
+    limiter: MultiDimLimiter,
 }
 
 impl QuotaManager {
     pub fn new() -> Self {
         Self {
-            quotas: RwLock::new(HashMap::new()),
-            usage: RwLock::new(HashMap::new()),
+            quotas: parking_lot::RwLock::new(HashMap::new()),
+            limiter: MultiDimLimiter::new(),
         }
     }
 
     pub fn set_quota(&self, quota: QuotaDefinition) {
-        self.quotas.write().insert(quota.project_id.clone(), quota);
+        let project_id = quota.project_id.clone();
+        let cfg = quota.to_multi_dim();
+        self.quotas.write().insert(project_id.clone(), quota);
+        self.limiter.set_config(project_id, cfg);
     }
 
     pub fn get_quota(&self, project_id: &str) -> Option<QuotaDefinition> {
@@ -115,7 +155,11 @@ impl QuotaManager {
     }
 
     pub fn delete_quota(&self, project_id: &str) -> bool {
-        self.quotas.write().remove(project_id).is_some()
+        let removed = self.quotas.write().remove(project_id).is_some();
+        if removed {
+            self.limiter.remove_config(project_id);
+        }
+        removed
     }
 
     /// Check if an ingestion request is allowed under the project's quota.
@@ -126,87 +170,59 @@ impl QuotaManager {
         count: u64,
         bytes: u64,
     ) -> RateLimitResult {
-        let quotas = self.quotas.read();
-        let quota = match quotas.get(project_id) {
-            Some(q) if q.enabled => q,
-            _ => return RateLimitResult::Allowed, // No quota = unlimited
+        // Historical fluxx contract: any unrecognised signal name is
+        // lumped into the `events` bucket for both counting and limit
+        // enforcement. Preserve that so the dashboard's per-signal
+        // breakdown stays consistent.
+        let effective_signal = match signal {
+            "events" | "logs" | "metrics" | "spans" => signal,
+            _ => "events",
         };
-
-        let mut usage = self.usage.write();
-        let state = usage.entry(project_id.to_string()).or_insert_with(RateLimiterState::new);
-        state.reset_if_expired();
-
-        // Update usage
-        state.bytes += bytes;
-        match signal {
-            "events" => state.events += count,
-            "logs" => state.logs += count,
-            "metrics" => state.metrics += count,
-            "spans" => state.spans += count,
-            _ => state.events += count,
-        }
-
-        // Check limits
-        let over_limit = state.events > quota.events_per_minute
-            || state.logs > quota.logs_per_minute
-            || state.metrics > quota.metrics_per_minute
-            || state.spans > quota.spans_per_minute
-            || state.bytes > quota.bytes_per_minute;
-
-        if over_limit {
-            match quota.exceeded_action.as_str() {
-                "drop" => { state.dropped += count; RateLimitResult::Dropped }
-                "throttle" => { state.throttled += count; RateLimitResult::Throttled }
-                _ => { state.throttled += count; RateLimitResult::Allowed } // "warn" = log but allow
-            }
-        } else {
-            RateLimitResult::Allowed
-        }
+        self.limiter
+            .check(project_id, effective_signal, count, bytes)
+            .into()
     }
 
     /// Get current usage stats for a project.
     pub fn get_usage(&self, project_id: &str) -> QuotaUsage {
-        let usage = self.usage.read();
-        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_micros() as u64;
-
-        match usage.get(project_id) {
-            Some(state) => QuotaUsage {
-                project_id: project_id.to_string(),
-                window_start: now.saturating_sub(state.window_start.elapsed().as_micros() as u64),
-                events_count: state.events, logs_count: state.logs,
-                metrics_count: state.metrics, spans_count: state.spans,
-                bytes_count: state.bytes, throttled_count: state.throttled,
-                dropped_count: state.dropped,
-            },
-            None => QuotaUsage {
-                project_id: project_id.to_string(), window_start: now,
-                events_count: 0, logs_count: 0, metrics_count: 0, spans_count: 0,
-                bytes_count: 0, throttled_count: 0, dropped_count: 0,
-            },
-        }
+        QuotaUsage::from_snapshot(project_id, &self.limiter.usage(project_id))
     }
 }
 
 impl Default for QuotaManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// POST /v1/quotas — Set a project quota.
-pub async fn set_quota(State(state): State<Arc<ApiState>>, Json(quota): Json<QuotaDefinition>) -> impl IntoResponse {
+pub async fn set_quota(
+    State(state): State<Arc<ApiState>>,
+    Json(quota): Json<QuotaDefinition>,
+) -> impl IntoResponse {
     state.quota_manager.set_quota(quota);
     StandardResponse::ok(serde_json::json!({"set": true}), "Quota set.")
 }
 
 /// GET /v1/quotas — List all quotas.
 pub async fn list_quotas(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    StandardResponse::ok(serde_json::to_value(&state.quota_manager.list_quotas()).unwrap_or_default(), "Quotas.")
+    StandardResponse::ok(
+        serde_json::to_value(state.quota_manager.list_quotas()).unwrap_or_default(),
+        "Quotas.",
+    )
 }
 
 /// GET /v1/quotas/:project_id/usage — Get current usage vs quota.
-pub async fn get_usage(Path(project_id): Path<String>, State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+pub async fn get_usage(
+    Path(project_id): Path<String>,
+    State(state): State<Arc<ApiState>>,
+) -> impl IntoResponse {
     let usage = state.quota_manager.get_usage(&project_id);
     let quota = state.quota_manager.get_quota(&project_id);
-    StandardResponse::ok(serde_json::json!({ "usage": usage, "quota": quota }), "Quota usage.")
+    StandardResponse::ok(
+        serde_json::json!({ "usage": usage, "quota": quota }),
+        "Quota usage.",
+    )
 }
 
 #[cfg(test)]
@@ -217,34 +233,56 @@ mod tests {
     fn test_rate_limiting() {
         let mgr = QuotaManager::new();
         mgr.set_quota(QuotaDefinition {
-            project_id: "proj-1".into(), name: "Test".into(),
-            events_per_minute: 100, logs_per_minute: 100,
-            metrics_per_minute: 100, spans_per_minute: 100,
-            bytes_per_minute: 1_000_000, exceeded_action: "drop".into(), enabled: true,
+            project_id: "proj-1".into(),
+            name: "Test".into(),
+            events_per_minute: 100,
+            logs_per_minute: 100,
+            metrics_per_minute: 100,
+            spans_per_minute: 100,
+            bytes_per_minute: 1_000_000,
+            exceeded_action: "drop".into(),
+            enabled: true,
         });
 
         // Under limit
-        assert_eq!(mgr.check_rate("proj-1", "events", 50, 1000), RateLimitResult::Allowed);
+        assert_eq!(
+            mgr.check_rate("proj-1", "events", 50, 1000),
+            RateLimitResult::Allowed
+        );
         // Still under
-        assert_eq!(mgr.check_rate("proj-1", "events", 40, 1000), RateLimitResult::Allowed);
+        assert_eq!(
+            mgr.check_rate("proj-1", "events", 40, 1000),
+            RateLimitResult::Allowed
+        );
         // Over limit
-        assert_eq!(mgr.check_rate("proj-1", "events", 20, 1000), RateLimitResult::Dropped);
+        assert_eq!(
+            mgr.check_rate("proj-1", "events", 20, 1000),
+            RateLimitResult::Dropped
+        );
     }
 
     #[test]
     fn test_no_quota_allows_all() {
         let mgr = QuotaManager::new();
-        assert_eq!(mgr.check_rate("no-quota", "events", 1_000_000, 0), RateLimitResult::Allowed);
+        assert_eq!(
+            mgr.check_rate("no-quota", "events", 1_000_000, 0),
+            RateLimitResult::Allowed
+        );
     }
 
     #[test]
     fn test_usage_tracking() {
         let mgr = QuotaManager::new();
         mgr.set_quota(QuotaDefinition {
-            project_id: "proj-1".into(), name: "Test".into(),
-            events_per_minute: 1000, logs_per_minute: 1000,
-            metrics_per_minute: 1000, spans_per_minute: 1000,
-            bytes_per_minute: 10_000_000, exceeded_action: "warn".into(), enabled: true,
+            project_id: "proj-1".into(),
+            name: "Test".into(),
+            events_per_minute: 1000,
+            logs_per_minute: 1000,
+            metrics_per_minute: 1000,
+            spans_per_minute: 1000,
+            bytes_per_minute: 10_000_000,
+            exceeded_action: "warn".into(),
+            enabled: true,
         });
 
         mgr.check_rate("proj-1", "events", 50, 5000);
@@ -258,10 +296,15 @@ mod tests {
 
     fn quota(action: &str) -> QuotaDefinition {
         QuotaDefinition {
-            project_id: "p".into(), name: "n".into(),
-            events_per_minute: 100, logs_per_minute: 100,
-            metrics_per_minute: 100, spans_per_minute: 100,
-            bytes_per_minute: 1_000_000, exceeded_action: action.into(), enabled: true,
+            project_id: "p".into(),
+            name: "n".into(),
+            events_per_minute: 100,
+            logs_per_minute: 100,
+            metrics_per_minute: 100,
+            spans_per_minute: 100,
+            bytes_per_minute: 1_000_000,
+            exceeded_action: action.into(),
+            enabled: true,
         }
     }
 
@@ -269,15 +312,24 @@ mod tests {
     fn test_signal_type_logs() {
         let mgr = QuotaManager::new();
         mgr.set_quota(quota("drop"));
-        assert_eq!(mgr.check_rate("p", "logs", 50, 0), RateLimitResult::Allowed);
-        assert_eq!(mgr.check_rate("p", "logs", 60, 0), RateLimitResult::Dropped);
+        assert_eq!(
+            mgr.check_rate("p", "logs", 50, 0),
+            RateLimitResult::Allowed
+        );
+        assert_eq!(
+            mgr.check_rate("p", "logs", 60, 0),
+            RateLimitResult::Dropped
+        );
     }
 
     #[test]
     fn test_signal_type_metrics() {
         let mgr = QuotaManager::new();
         mgr.set_quota(quota("drop"));
-        assert_eq!(mgr.check_rate("p", "metrics", 50, 0), RateLimitResult::Allowed);
+        assert_eq!(
+            mgr.check_rate("p", "metrics", 50, 0),
+            RateLimitResult::Allowed
+        );
         let u = mgr.get_usage("p");
         assert_eq!(u.metrics_count, 50);
     }
@@ -286,7 +338,10 @@ mod tests {
     fn test_signal_type_spans() {
         let mgr = QuotaManager::new();
         mgr.set_quota(quota("drop"));
-        assert_eq!(mgr.check_rate("p", "spans", 50, 0), RateLimitResult::Allowed);
+        assert_eq!(
+            mgr.check_rate("p", "spans", 50, 0),
+            RateLimitResult::Allowed
+        );
         let u = mgr.get_usage("p");
         assert_eq!(u.spans_count, 50);
     }
@@ -297,6 +352,8 @@ mod tests {
         mgr.set_quota(quota("drop"));
         mgr.check_rate("p", "unknown-signal", 10, 0);
         let u = mgr.get_usage("p");
+        // Historical fluxx behaviour: unknown signals lump into the
+        // `events` bucket. Preserved through `check_rate`'s rewrite.
         assert_eq!(u.events_count, 10);
     }
 
@@ -305,7 +362,10 @@ mod tests {
         let mgr = QuotaManager::new();
         mgr.set_quota(quota("throttle"));
         mgr.check_rate("p", "events", 100, 0);
-        assert_eq!(mgr.check_rate("p", "events", 10, 0), RateLimitResult::Throttled);
+        assert_eq!(
+            mgr.check_rate("p", "events", 10, 0),
+            RateLimitResult::Throttled
+        );
     }
 
     #[test]
@@ -313,7 +373,11 @@ mod tests {
         let mgr = QuotaManager::new();
         mgr.set_quota(quota("warn"));
         mgr.check_rate("p", "events", 100, 0);
-        assert_eq!(mgr.check_rate("p", "events", 10, 0), RateLimitResult::Allowed);
+        // `Warned` maps back to `Allowed` per the historical contract.
+        assert_eq!(
+            mgr.check_rate("p", "events", 10, 0),
+            RateLimitResult::Allowed
+        );
     }
 
     #[test]
@@ -322,14 +386,20 @@ mod tests {
         let mut q = quota("drop");
         q.enabled = false;
         mgr.set_quota(q);
-        assert_eq!(mgr.check_rate("p", "events", 1_000_000, 0), RateLimitResult::Allowed);
+        assert_eq!(
+            mgr.check_rate("p", "events", 1_000_000, 0),
+            RateLimitResult::Allowed
+        );
     }
 
     #[test]
     fn test_bytes_limit_triggers() {
         let mgr = QuotaManager::new();
         mgr.set_quota(quota("drop"));
-        assert_eq!(mgr.check_rate("p", "events", 1, 2_000_000), RateLimitResult::Dropped);
+        assert_eq!(
+            mgr.check_rate("p", "events", 1, 2_000_000),
+            RateLimitResult::Dropped
+        );
     }
 
     #[test]
@@ -355,8 +425,10 @@ mod tests {
     #[test]
     fn test_list_quotas_multiple() {
         let mgr = QuotaManager::new();
-        let mut q1 = quota("drop"); q1.project_id = "a".into();
-        let mut q2 = quota("drop"); q2.project_id = "b".into();
+        let mut q1 = quota("drop");
+        q1.project_id = "a".into();
+        let mut q2 = quota("drop");
+        q2.project_id = "b".into();
         mgr.set_quota(q1);
         mgr.set_quota(q2);
         assert_eq!(mgr.list_quotas().len(), 2);

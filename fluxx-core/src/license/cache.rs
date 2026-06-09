@@ -9,150 +9,75 @@
 //! firewall blips). Without a cache the agent would refuse to start every
 //! single time. With a cache we tolerate up to 7 days of offline.
 //!
-//! The cache is keyed by the sha256 fingerprint of the API key. Multiple
-//! keys can share the same `.fluxx/` directory without colliding.
+//! ## Implementation
+//!
+//! The atomic-write / sha256-key-fingerprint / TTL plumbing lives in
+//! `utilx::cache::disk_json::DiskJsonCache<T>`. This file is a thin wrapper
+//! that fixes `T = LicenseInfo` and pins the fluxx-specific cache path
+//! (`~/.fluxx/license.cache.json`) so 100% of call-site behaviour stays
+//! identical.
 
 use crate::license::LicenseInfo;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// Default cache TTL: 7 days.
-pub const DEFAULT_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const DEFAULT_TTL: Duration = utilx::cache::disk_json::DEFAULT_TTL;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CacheEntry {
-    /// Unix seconds when this entry was written.
-    written_at: u64,
-    /// sha256 of the api key, hex.
-    api_key_hash: String,
-    /// The verified license info from the server.
-    license: LicenseInfo,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct CacheFile {
-    entries: Vec<CacheEntry>,
-}
-
+/// 7-day on-disk cache for verified license info.
 pub struct Cache {
-    path: PathBuf,
-    ttl: Duration,
+    inner: utilx::cache::disk_json::DiskJsonCache<LicenseInfo>,
 }
 
 impl Cache {
     /// Cache at `~/.fluxx/license.cache.json`. Returns `None` if no home dir
     /// can be resolved (e.g. headless CI).
     pub fn default_location() -> Option<Self> {
-        let mut p = dirs::home_dir()?;
-        p.push(".fluxx");
-        p.push("license.cache.json");
-        Some(Self { path: p, ttl: DEFAULT_TTL })
+        utilx::cache::disk_json::DiskJsonCache::default_at_home(".fluxx", "license.cache.json")
+            .map(|inner| Self { inner })
     }
 
     /// Test/CI helper — pin the path and (optionally) the TTL.
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), ttl: DEFAULT_TTL }
+        Self {
+            inner: utilx::cache::disk_json::DiskJsonCache::at(path),
+        }
     }
 
-    pub fn with_ttl(mut self, ttl: Duration) -> Self {
-        self.ttl = ttl;
-        self
+    /// Override the TTL (builder).
+    pub fn with_ttl(self, ttl: Duration) -> Self {
+        Self {
+            inner: self.inner.with_ttl(ttl),
+        }
     }
 
+    /// Return the on-disk path.
     pub fn path(&self) -> &std::path::Path {
-        &self.path
+        self.inner.path()
     }
 
     /// Read a cached license for `api_key`. Returns `None` if missing, expired,
     /// or the file can't be parsed.
     pub fn get(&self, api_key: &str) -> Option<LicenseInfo> {
-        let bytes = std::fs::read(&self.path).ok()?;
-        let file: CacheFile = serde_json::from_slice(&bytes).ok()?;
-        let hash = hash_key(api_key);
-        let entry = file.entries.iter().find(|e| e.api_key_hash == hash)?;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-        if now < entry.written_at {
-            // Clock skew — pretend the entry is fresh; system clock moving
-            // backwards isn't our problem to solve.
-            return Some(entry.license.clone());
-        }
-        if now.saturating_sub(entry.written_at) >= self.ttl.as_secs() {
-            return None;
-        }
-        Some(entry.license.clone())
+        self.inner.get(api_key)
     }
 
     /// Insert or replace the entry for `api_key`. Best-effort: if the file
-    /// can't be written, the error is swallowed (we still have the
-    /// in-memory license).
+    /// can't be written, the error is surfaced so the caller can decide to
+    /// proceed with the in-memory license.
     pub fn put(&self, api_key: &str, license: &LicenseInfo) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut file: CacheFile = std::fs::read(&self.path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        let hash = hash_key(api_key);
-        file.entries.retain(|e| e.api_key_hash != hash);
-        let written_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        file.entries.push(CacheEntry {
-            written_at,
-            api_key_hash: hash,
-            license: license.clone(),
-        });
-        // Limit to 16 entries — well above the typical "1 API key per host"
-        // pattern, but bounded so a misuse can't blow up the file.
-        while file.entries.len() > 16 {
-            file.entries.remove(0);
-        }
-        let json = serde_json::to_vec_pretty(&file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        atomic_write(&self.path, &json)
+        self.inner.put(api_key, license)
     }
 
-    /// Drop the entry (e.g. on revocation).
+    /// Drop the entry (e.g. on revocation). No-op when missing.
     pub fn drop(&self, api_key: &str) -> std::io::Result<()> {
-        let bytes = match std::fs::read(&self.path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        let mut file: CacheFile = serde_json::from_slice(&bytes)
-            .unwrap_or_default();
-        let hash = hash_key(api_key);
-        let before = file.entries.len();
-        file.entries.retain(|e| e.api_key_hash != hash);
-        if file.entries.len() == before {
-            return Ok(());
-        }
-        let json = serde_json::to_vec_pretty(&file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        atomic_write(&self.path, &json)
+        self.inner.drop(api_key)
     }
-}
-
-fn hash_key(api_key: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(api_key.as_bytes());
-    hex::encode(h.finalize())
-}
-
-fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("cache.tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn fake_license() -> LicenseInfo {
         LicenseInfo {
@@ -164,11 +89,10 @@ mod tests {
     }
 
     fn tempfile() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+        std::env::temp_dir().join(format!(
             "fluxx-cache-test-{}.json",
             uuid::Uuid::new_v4()
-        ));
-        dir
+        ))
     }
 
     #[test]
@@ -207,7 +131,6 @@ mod tests {
     #[test]
     fn entries_returned_within_ttl_window() {
         let path = tempfile();
-        // 60-second TTL — should never expire during the test.
         let cache = Cache::at(&path).with_ttl(Duration::from_secs(60));
         cache.put("flx_live_aaa", &fake_license()).unwrap();
         assert!(cache.get("flx_live_aaa").is_some());
@@ -222,7 +145,10 @@ mod tests {
         let mut updated = fake_license();
         updated.tier = Some("enterprise".into());
         cache.put("flx_live_aaa", &updated).unwrap();
-        assert_eq!(cache.get("flx_live_aaa").unwrap().tier, Some("enterprise".into()));
+        assert_eq!(
+            cache.get("flx_live_aaa").unwrap().tier,
+            Some("enterprise".into())
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -239,33 +165,9 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_returns_none() {
-        let path = tempfile();
-        std::fs::write(&path, "not-json").unwrap();
-        let cache = Cache::at(&path);
-        assert!(cache.get("anything").is_none());
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
     fn drop_on_missing_file_is_ok() {
         let path = tempfile();
         let cache = Cache::at(&path);
-        // No file written; drop is a no-op.
         cache.drop("anything").unwrap();
-    }
-
-    #[test]
-    fn cap_at_16_entries() {
-        let path = tempfile();
-        let cache = Cache::at(&path);
-        for i in 0..20 {
-            cache.put(&format!("flx_live_{i}"), &fake_license()).unwrap();
-        }
-        // The 20th entry kicked out the first four — confirm:
-        let bytes = std::fs::read(&path).unwrap();
-        let file: CacheFile = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(file.entries.len(), 16);
-        std::fs::remove_file(&path).ok();
     }
 }

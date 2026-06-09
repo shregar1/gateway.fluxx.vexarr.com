@@ -16,15 +16,26 @@
 //!
 //! In-memory only. The grant token never touches disk; it's short-lived by
 //! design (~15 minutes) and re-mintable on demand.
+//!
+//! ## Implementation
+//!
+//! The generic plumbing — in-memory grant store, HMAC-signed header
+//! builder, background refresh task — lives in
+//! `utilx::license::grant_client`. This file pins the fluxx-specific URL
+//! paths (`/api/v1/runtime/grant{,/refresh}`), API-key header
+//! (`X-API-Key`), the `GrantTokenSet` shape, and the four `X-Fluxx-*`
+//! header names that go onto every outbound premium call.
 
 use crate::license::fingerprint;
-use crate::license::signing::{self, Signature};
-use parking_lot::RwLock;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{debug, warn};
+
+/// Thread-safe in-memory store for the current grant. Type alias over the
+/// generic `utilx::license::grant_client::GrantStore<G>` so existing call
+/// sites that referenced `GrantStore` (no generic argument) continue to
+/// compile.
+pub type GrantStore = utilx::license::grant_client::GrantStore<GrantTokenSet>;
 
 /// Refresh window: refresh whenever the grant has less than this much
 /// remaining lifetime. The control plane mints 15-minute grants, so this
@@ -36,7 +47,7 @@ pub struct GrantTokenSet {
     pub grant_urn: String,
     pub grant_token: String,
     /// Per-grant HMAC key, hex. The agent uses this to sign every premium
-    /// request body via `signing::sign(...)`.
+    /// request body via `utilx::license::grant_client::sign_request`.
     pub hmac_key: String,
     pub expires_at: String,
     pub ttl_seconds: u64,
@@ -70,6 +81,17 @@ impl GrantTokenSet {
     }
 }
 
+// Bridge the fluxx grant shape into the generic refresher trait.
+impl utilx::license::grant_client::GrantOps for GrantTokenSet {
+    fn is_fresh_enough(&self, safety_margin: Duration) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.expires_unix > now + safety_margin.as_secs()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GrantError {
     #[error("Network error: {0}")]
@@ -80,30 +102,8 @@ pub enum GrantError {
     Malformed(String),
     #[error("No active grant; mint one first")]
     NoActiveGrant,
-}
-
-/// Thread-safe in-memory store for the current grant. Use one per agent.
-#[derive(Clone, Default)]
-pub struct GrantStore {
-    inner: Arc<RwLock<Option<GrantTokenSet>>>,
-}
-
-impl GrantStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn current(&self) -> Option<GrantTokenSet> {
-        self.inner.read().clone()
-    }
-
-    pub fn replace(&self, grant: GrantTokenSet) {
-        *self.inner.write() = Some(grant);
-    }
-
-    pub fn clear(&self) {
-        *self.inner.write() = None;
-    }
+    #[error("HMAC key on grant is malformed: {0}")]
+    BadHmacKey(String),
 }
 
 /// Configuration for the grant client. Pulled from env in production; tests
@@ -119,18 +119,18 @@ pub struct GrantConfig {
 
 impl GrantConfig {
     pub fn from_env() -> Result<Self, GrantError> {
-        let api_key = std::env::var("FLUXX_API_KEY")
-            .map_err(|_| GrantError::ServerRejected {
-                status: 0,
-                message: "FLUXX_API_KEY not set".into(),
-            })?;
+        let api_key = std::env::var("FLUXX_API_KEY").map_err(|_| GrantError::ServerRejected {
+            status: 0,
+            message: "FLUXX_API_KEY not set".into(),
+        })?;
         if api_key.is_empty() {
             return Err(GrantError::ServerRejected {
                 status: 0,
                 message: "FLUXX_API_KEY is empty".into(),
             });
         }
-        let api_base = std::env::var("FLUXX_API_URL").unwrap_or_else(|_| "https://api.fluxx.dev".to_string());
+        let api_base =
+            std::env::var("FLUXX_API_URL").unwrap_or_else(|_| "https://api.fluxx.dev".to_string());
         let agent_version = option_env!("CARGO_PKG_VERSION").map(|s| s.to_string());
         Ok(Self {
             api_base,
@@ -162,8 +162,15 @@ struct RawGrant {
 }
 
 /// Mint a fresh grant. Replaces any existing one in the store.
-pub async fn mint(client: &Client, cfg: &GrantConfig, store: &GrantStore) -> Result<GrantTokenSet, GrantError> {
-    let url = format!("{}/api/v1/runtime/grant", cfg.api_base.trim_end_matches('/'));
+pub async fn mint(
+    client: &Client,
+    cfg: &GrantConfig,
+    store: &GrantStore,
+) -> Result<GrantTokenSet, GrantError> {
+    let url = format!(
+        "{}/api/v1/runtime/grant",
+        cfg.api_base.trim_end_matches('/')
+    );
     let body = serde_json::json!({
         "machine_fingerprint_sha256": fingerprint::current(),
         "agent_version": cfg.agent_version,
@@ -182,9 +189,14 @@ pub async fn mint(client: &Client, cfg: &GrantConfig, store: &GrantStore) -> Res
         .await
         .map_err(|e| GrantError::Malformed(e.to_string()))?;
     if envelope.status != "SUCCESS" {
-        return Err(GrantError::ServerRejected { status, message: envelope.response_message });
+        return Err(GrantError::ServerRejected {
+            status,
+            message: envelope.response_message,
+        });
     }
-    let raw = envelope.data.ok_or_else(|| GrantError::Malformed("missing data".into()))?;
+    let raw = envelope
+        .data
+        .ok_or_else(|| GrantError::Malformed("missing data".into()))?;
     let grant = build_grant(raw);
     store.replace(grant.clone());
     Ok(grant)
@@ -199,7 +211,10 @@ pub async fn refresh(
     store: &GrantStore,
 ) -> Result<GrantTokenSet, GrantError> {
     let previous = store.current().ok_or(GrantError::NoActiveGrant)?;
-    let url = format!("{}/api/v1/runtime/grant/refresh", cfg.api_base.trim_end_matches('/'));
+    let url = format!(
+        "{}/api/v1/runtime/grant/refresh",
+        cfg.api_base.trim_end_matches('/')
+    );
     let body = serde_json::json!({
         "previous_grant_token": previous.grant_token,
         "machine_fingerprint_sha256": fingerprint::current(),
@@ -219,16 +234,24 @@ pub async fn refresh(
         .await
         .map_err(|e| GrantError::Malformed(e.to_string()))?;
     if envelope.status != "SUCCESS" {
-        return Err(GrantError::ServerRejected { status, message: envelope.response_message });
+        return Err(GrantError::ServerRejected {
+            status,
+            message: envelope.response_message,
+        });
     }
-    let raw = envelope.data.ok_or_else(|| GrantError::Malformed("missing data".into()))?;
+    let raw = envelope
+        .data
+        .ok_or_else(|| GrantError::Malformed("missing data".into()))?;
     let grant = build_grant(raw);
     store.replace(grant.clone());
     Ok(grant)
 }
 
 fn build_grant(raw: RawGrant) -> GrantTokenSet {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     GrantTokenSet {
         grant_urn: raw.grant_urn,
         grant_token: raw.grant_token,
@@ -242,7 +265,7 @@ fn build_grant(raw: RawGrant) -> GrantTokenSet {
     }
 }
 
-/// Spawn a background refresh task. The task ticks every 60 s, and refreshes
+/// Spawn a background refresh task. The task ticks every 60s and refreshes
 /// whenever the grant has less than `REFRESH_BEFORE_EXPIRY` remaining. If
 /// refresh fails (e.g. revoked), the store is cleared so the next premium
 /// call surfaces the error instead of using a stale grant.
@@ -251,13 +274,17 @@ pub fn start_refresher(
     cfg: GrantConfig,
     store: GrantStore,
 ) -> tokio::task::JoinHandle<()> {
+    // Same loop shape as `utilx::license::grant_client::spawn_refresher`
+    // but built inline so we can preserve the fluxx-specific mint/refresh
+    // URL paths + `X-API-Key` header without forcing the generic trait
+    // (which expects a `GrantSource` impl) to know about reqwest.
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         loop {
             tick.tick().await;
             let needs_refresh = store
                 .current()
-                .map(|g| !g.is_fresh_enough())
+                .map(|g| !GrantTokenSet::is_fresh_enough(&g))
                 .unwrap_or(true);
             if !needs_refresh {
                 continue;
@@ -268,14 +295,14 @@ pub fn start_refresher(
                 mint(&client, &cfg, &store).await
             };
             match result {
-                Ok(g) => debug!(
+                Ok(g) => tracing::debug!(
                     grant_urn = %g.grant_urn,
                     tier = %g.tier,
                     expires_in = g.ttl_seconds,
                     "refreshed runtime grant"
                 ),
                 Err(e) => {
-                    warn!(error = %e, "grant refresh failed; clearing in-memory grant");
+                    tracing::warn!(error = %e, "grant refresh failed; clearing in-memory grant");
                     store.clear();
                 }
             }
@@ -300,8 +327,12 @@ pub fn with_signed_request(
     req: reqwest::RequestBuilder,
     grant: &GrantTokenSet,
     body: &[u8],
-) -> Result<reqwest::RequestBuilder, signing::SigningError> {
-    let sig: Signature = signing::sign(body, &grant.hmac_key)?;
+) -> Result<reqwest::RequestBuilder, crate::license::signing::SigningError> {
+    // Use the local signing wrapper so any downstream tests that lean on
+    // the fluxx `Signature` shape (nonce / timestamp / signature hex) keep
+    // working. Internally `signing::sign` delegates to
+    // `utilx::auth::hmac::sign_request_now`.
+    let sig = crate::license::signing::sign(body, &grant.hmac_key)?;
     Ok(req
         .header("Authorization", format!("Bearer {}", grant.grant_token))
         .header("X-Fluxx-Nonce", sig.nonce)
@@ -328,7 +359,7 @@ mod tests {
 
     #[test]
     fn store_replace_and_clear_round_trip() {
-        let store = GrantStore::new();
+        let store: GrantStore = GrantStore::new();
         assert!(store.current().is_none());
         store.replace(build_grant(fake_raw(vec!["ai_diagnostics"])));
         assert!(store.current().is_some());
@@ -354,7 +385,7 @@ mod tests {
     #[test]
     fn freshly_minted_grant_is_fresh_enough() {
         let g = build_grant(fake_raw(vec!["ai_diagnostics"]));
-        assert!(g.is_fresh_enough());
+        assert!(GrantTokenSet::is_fresh_enough(&g));
     }
 
     #[test]
@@ -366,7 +397,7 @@ mod tests {
             .map(|d| d.as_secs())
             .unwrap_or(0)
             + 60;
-        assert!(!g.is_fresh_enough());
+        assert!(!GrantTokenSet::is_fresh_enough(&g));
     }
 
     #[test]

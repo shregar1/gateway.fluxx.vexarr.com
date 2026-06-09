@@ -28,8 +28,9 @@ fluxx-core = { path = "../fluxx-core" }
 # Shared vexarr utility crate. fluxx-api consumes:
 #   - `auth` for the constant-time-eq bearer match (src/auth.rs)
 #   - `http-envelope` for the StandardResponse<T> shape (src/response.rs)
+#   - `ratelimit` for the multi-dimensional quota counter (src/quotas.rs)
 # Same `[patch]` redirect as in fluxx-core.
-utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["auth", "http-envelope"] }
+utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["auth", "http-envelope", "ratelimit"] }
 
 # Web stack — kept aligned with what fluxx-core already pulls in so the
 # resolver doesn't pick conflicting versions.
