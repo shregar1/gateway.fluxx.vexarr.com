@@ -1,131 +1,27 @@
 //! Machine fingerprint.
 //!
-//! sha256 over a small set of **stable** machine identifiers. The hash is
-//! sent to the control plane on every grant mint and refresh. The raw inputs
-//! never leave the host — only the hash.
+//! The implementation lives in `utilx::fingerprint`; this file is a thin
+//! wrapper that pins the fluxx-specific version prefix (`fluxx-fp-v1`) so
+//! existing on-disk caches and control-plane bindings continue to validate.
+//! The cached call (`current()`) keeps the lock-free hot path that the rest
+//! of the gateway relies on.
 //!
-//! Stable inputs (chosen for low churn under normal ops):
-//!   * machine UUID — Linux `/etc/machine-id`, macOS `IOPlatformUUID`,
-//!     Windows registry. Survives reboots, dies on reinstall.
-//!   * primary MAC address — first non-loopback MAC. Drifts on VM resize
-//!     or new NIC, which is acceptable: that's a real "new device".
-//!   * hostname.
-//!   * CPU brand string.
-//!
-//! Deliberately UNSTABLE inputs we do NOT use:
-//!   * current PID, process ID
-//!   * wall-clock time
-//!   * any environment variable (would let a tampered binary trivially
-//!     forge a different machine)
-//!
-//! The fingerprint is computed once at startup and cached in memory for the
-//! lifetime of the process. Use `current()` from anywhere — it's lock-free
-//! after the first call.
+//! See `utilx::fingerprint` for the input mix, fallback chain across OSes,
+//! and the rationale for excluding unstable inputs like PID / wall-clock.
 
-use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
+
+/// Version prefix mixed into the fingerprint hash. Bumping this invalidates
+/// every existing fluxx-issued grant, so don't touch unless the algorithm
+/// changes.
+const FLUXX_FP_PREFIX: &str = "fluxx-fp-v1";
 
 static CACHED: OnceLock<String> = OnceLock::new();
 
-/// The sha256-hex fingerprint for the current host. Computed once.
+/// The sha256-hex fingerprint for the current host. Computed once and cached
+/// for the process lifetime.
 pub fn current() -> &'static str {
-    CACHED.get_or_init(compute)
-}
-
-fn compute() -> String {
-    let mut h = Sha256::new();
-    h.update(b"fluxx-fp-v1\0");
-    h.update(read_machine_id().as_bytes());
-    h.update(b"\0");
-    h.update(read_primary_mac().as_bytes());
-    h.update(b"\0");
-    h.update(read_hostname().as_bytes());
-    h.update(b"\0");
-    h.update(read_cpu_brand().as_bytes());
-    hex::encode(h.finalize())
-}
-
-fn read_machine_id() -> String {
-    // Linux first.
-    if let Ok(s) = std::fs::read_to_string("/etc/machine-id") {
-        let id = s.trim();
-        if !id.is_empty() {
-            return id.to_string();
-        }
-    }
-    // /var/lib/dbus path (some distros).
-    if let Ok(s) = std::fs::read_to_string("/var/lib/dbus/machine-id") {
-        let id = s.trim();
-        if !id.is_empty() {
-            return id.to_string();
-        }
-    }
-    // macOS fallback via ioreg if available.
-    if let Ok(out) = std::process::Command::new("ioreg")
-        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
-        .output()
-    {
-        if let Ok(s) = std::str::from_utf8(&out.stdout) {
-            for line in s.lines() {
-                if let Some(eq) = line.find("IOPlatformUUID") {
-                    if let Some(start) = line[eq..].find('"') {
-                        let after = &line[eq + start + 1..];
-                        if let Some(end) = after.find('"') {
-                            return after[..end].to_string();
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // Windows fallback via WMI's `wmic csproduct get uuid`.
-    if cfg!(windows) {
-        if let Ok(out) = std::process::Command::new("wmic")
-            .args(["csproduct", "get", "uuid"])
-            .output()
-        {
-            if let Ok(s) = std::str::from_utf8(&out.stdout) {
-                for line in s.lines() {
-                    let trimmed = line.trim();
-                    // First non-header line that looks like a UUID.
-                    if trimmed.len() == 36 && trimmed.matches('-').count() == 4 {
-                        return trimmed.to_string();
-                    }
-                }
-            }
-        }
-    }
-    // Last-ditch: stable across the process lifetime even if we can't read
-    // a real machine id. This is rare in practice (no /etc/machine-id, no
-    // ioreg, no wmic) and the grant verification will simply rebind to
-    // whatever we report.
-    "unknown-machine".to_string()
-}
-
-fn read_primary_mac() -> String {
-    match mac_address::get_mac_address() {
-        Ok(Some(addr)) => addr.to_string(),
-        _ => "00:00:00:00:00:00".to_string(),
-    }
-}
-
-fn read_hostname() -> String {
-    hostname::get()
-        .ok()
-        .and_then(|os| os.into_string().ok())
-        .unwrap_or_else(|| "unknown-host".to_string())
-}
-
-fn read_cpu_brand() -> String {
-    // sysinfo 0.30 removed the SystemExt/CpuExt traits — methods are now
-    // directly on the structs.
-    use sysinfo::System;
-    let mut sys = System::new();
-    sys.refresh_cpu();
-    sys.cpus()
-        .first()
-        .map(|c| c.brand().to_string())
-        .unwrap_or_else(|| "unknown-cpu".to_string())
+    CACHED.get_or_init(|| utilx::fingerprint::compute_with_prefix(FLUXX_FP_PREFIX))
 }
 
 #[cfg(test)]
@@ -147,10 +43,12 @@ mod tests {
     }
 
     #[test]
-    fn compute_is_deterministic_for_the_same_machine() {
-        // Compute twice in a row; should match within the same process.
-        let a = compute();
-        let b = compute();
-        assert_eq!(a, b);
+    fn fluxx_prefix_distinct_from_utilx_default() {
+        // Sanity guard: the fluxx-flavoured fingerprint must not collide with
+        // the utilx-flavoured default, even on the same host. If this fails,
+        // a refactor accidentally let the prefix leak.
+        let fluxx_fp = current();
+        let utilx_fp = utilx::fingerprint::current();
+        assert_ne!(fluxx_fp, utilx_fp);
     }
 }

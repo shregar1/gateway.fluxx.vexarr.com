@@ -37,9 +37,15 @@ bundled-openclaw = []
 #     (src/protocols/tracecontext.rs is a thin re-export)
 #   - `auth` for HMAC-SHA256 signed-request envelope
 #     (src/license/signing.rs delegates to utilx::auth::hmac::sign)
+#   - `logging` for the global tracing-subscriber init helper
+#     (src/utils/mod.rs::init_logging is a thin wrapper)
+#   - `fingerprint` for the sha256-machine-id binding hash
+#     (src/license/fingerprint.rs is a thin wrapper)
+#   - `tls-pin` for SPKI-pinned reqwest clients
+#     (src/license/cert_pin.rs is a thin re-export)
 # Workspace `[patch]` (see workspace Cargo.toml) redirects the git URL
 # to a local checkout for dev builds.
-utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["tracecontext", "auth"] }
+utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["tracecontext", "auth", "logging", "fingerprint", "tls-pin"] }
 
 urlencoding = "2"
 num_cpus = "1.16"
