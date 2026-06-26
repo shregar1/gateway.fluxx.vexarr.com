@@ -8,8 +8,9 @@ WORKDIR /app
 # Copy the build context (which includes members and the copied utilx)
 COPY . .
 
-# Fix the Cargo workspace patch path for the copied utilx context
-RUN sed -i 's|../../utilx/core.utilx.vexarr.com|./utilx/core.utilx.vexarr.com|g' Cargo.toml
+# Fix the Cargo workspace patch path for the copied utilx context and delete Cargo.lock files to force local resolution
+RUN sed -i 's|../../utilx/core.utilx.vexarr.com|./utilx/core.utilx.vexarr.com|g' Cargo.toml && \
+    find . -name "Cargo.lock" -delete
 
 # Build the release binary from the workspace
 RUN cargo build --release --bin fluxx
