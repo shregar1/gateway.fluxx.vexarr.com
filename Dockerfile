@@ -8,8 +8,9 @@ WORKDIR /app
 # Copy the build context (which includes members and the copied utilx)
 COPY . .
 
-# Rewrite git dependencies to local path dependencies for utilx, and clear Cargo.lock
-RUN find . -name "Cargo.toml" -exec sed -i 's|git = "https://github.com/shregar1/core.utilx.vexarr.com"|path = "../utilx/core.utilx.vexarr.com"|g' {} + && \
+# Fix patch path at workspace level, replace git dependencies at crate level, and clear Cargo.lock
+RUN sed -i 's|../../utilx/core.utilx.vexarr.com|./utilx/core.utilx.vexarr.com|g' Cargo.toml && \
+    find . -name "Cargo.toml" -exec sed -i 's|git = "https://github.com/shregar1/core.utilx.vexarr.com"|path = "../utilx/core.utilx.vexarr.com"|g' {} + && \
     find . -name "Cargo.lock" -delete
 
 # Build the release binary from the workspace
