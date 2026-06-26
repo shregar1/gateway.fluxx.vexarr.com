@@ -1,7 +1,7 @@
 # Build Stage
 FROM rust:alpine AS builder
 
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev git
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev git zstd-dev
 
 WORKDIR /app
 
